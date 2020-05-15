@@ -1,7 +1,9 @@
 # Copyright: Ankitects Pty Ltd and contributors
 # -*- coding: utf-8 -*-
 # License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
+
 from operator import itemgetter
+from typing import Dict, Union
 
 import aqt
 from anki.consts import NEW_CARDS_RANDOM
@@ -21,7 +23,7 @@ from aqt.utils import (
 
 
 class DeckConf(QDialog):
-    def __init__(self, mw, deck):
+    def __init__(self, mw: aqt.AnkiQt, deck: Dict):
         QDialog.__init__(self, mw)
         self.mw = mw
         self.deck = deck
@@ -34,10 +36,11 @@ class DeckConf(QDialog):
         self.setupCombos()
         self.setupConfs()
         self.setWindowModality(Qt.WindowModal)
-        self.form.buttonBox.helpRequested.connect(lambda: openHelp("deckoptions"))
-        self.form.confOpts.clicked.connect(self.confOpts)
-        self.form.buttonBox.button(QDialogButtonBox.RestoreDefaults).clicked.connect(
-            self.onRestore
+        qconnect(self.form.buttonBox.helpRequested, lambda: openHelp("deckoptions"))
+        qconnect(self.form.confOpts.clicked, self.confOpts)
+        qconnect(
+            self.form.buttonBox.button(QDialogButtonBox.RestoreDefaults).clicked,
+            self.onRestore,
         )
         self.setWindowTitle(_("Options for %s") % self.deck["name"])
         # qt doesn't size properly with altered fonts otherwise
@@ -52,13 +55,13 @@ class DeckConf(QDialog):
 
         f = self.form
         f.newOrder.addItems(list(cs.newCardOrderLabels().values()))
-        f.newOrder.currentIndexChanged.connect(self.onNewOrderChanged)
+        qconnect(f.newOrder.currentIndexChanged, self.onNewOrderChanged)
 
     # Conf list
     ######################################################################
 
     def setupConfs(self):
-        self.form.dconf.currentIndexChanged.connect(self.onConfChange)
+        qconnect(self.form.dconf.currentIndexChanged, self.onConfChange)
         self.conf = None
         self.loadConfs()
 
@@ -82,13 +85,13 @@ class DeckConf(QDialog):
     def confOpts(self):
         m = QMenu(self.mw)
         a = m.addAction(_("Add"))
-        a.triggered.connect(self.addGroup)
+        qconnect(a.triggered, self.addGroup)
         a = m.addAction(_("Delete"))
-        a.triggered.connect(self.remGroup)
+        qconnect(a.triggered, self.remGroup)
         a = m.addAction(_("Rename"))
-        a.triggered.connect(self.renameGroup)
+        qconnect(a.triggered, self.renameGroup)
         a = m.addAction(_("Set for all subdecks"))
-        a.triggered.connect(self.setChildren)
+        qconnect(a.triggered, self.setChildren)
         if not self.childDids:
             a.setEnabled(False)
         m.exec_(QCursor.pos())
@@ -116,33 +119,36 @@ class DeckConf(QDialog):
             txt = ""
         self.form.count.setText(txt)
 
-    def addGroup(self):
+    def addGroup(self) -> None:
         name = getOnlyText(_("New options group name:"))
         if not name:
             return
         # first, save currently entered data to current conf
         self.saveConf()
         # then clone the conf
-        id = self.mw.col.decks.confId(name, cloneFrom=self.conf)
+        id = self.mw.col.decks.add_config_returning_id(name, clone_from=self.conf)
         # set the deck to the new conf
         self.deck["conf"] = id
         # then reload the conf list
         self.loadConfs()
 
-    def remGroup(self):
+    def remGroup(self) -> None:
         if int(self.conf["id"]) == 1:
             showInfo(_("The default configuration can't be removed."), self)
         else:
-            self.mw.col.decks.remConf(self.conf["id"])
+            self.mw.col.modSchema(check=True)
+            self.mw.col.decks.remove_config(self.conf["id"])
+            self.conf = None
             self.deck["conf"] = 1
             self.loadConfs()
 
-    def renameGroup(self):
+    def renameGroup(self) -> None:
         old = self.conf["name"]
         name = getOnlyText(_("New name:"), default=old)
         if not name or name == old:
             return
         self.conf["name"] = name
+        self.saveConf()
         self.loadConfs()
 
     def setChildren(self):
@@ -165,7 +171,13 @@ class DeckConf(QDialog):
     ##################################################
 
     def listToUser(self, l):
-        return " ".join([str(x) for x in l])
+        def num_to_user(n: Union[int, float]):
+            if n == round(n):
+                return str(int(n))
+            else:
+                return str(n)
+
+        return " ".join(map(num_to_user, l))
 
     def parentLimText(self, type="new"):
         # top level?

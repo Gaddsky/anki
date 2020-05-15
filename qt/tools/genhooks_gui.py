@@ -186,6 +186,10 @@ hooks = [
         legacy_hook="browser.onContextMenu",
     ),
     Hook(
+        name="browser_header_will_show_context_menu",
+        args=["browser: aqt.browser.Browser", "menu: QMenu"],
+    ),
+    Hook(
         name="browser_did_change_row",
         args=["browser: aqt.browser.Browser"],
         legacy_hook="browser.rowChanged",
@@ -234,6 +238,26 @@ hooks = [
                 # or other add-ons to build the tag tree
                 return True
         """,
+    ),
+    Hook(
+        name="browser_will_search",
+        args=["context: aqt.browser.SearchContext"],
+        doc="""Allows you to modify the search text, or perform your own search.
+         
+         You can modify context.search to change the text that is sent to the
+         searching backend.
+         
+         If you set context.card_ids to a list of ids, the regular search will
+         not be performed, and the provided ids will be used instead.
+         
+         Your add-on should check if context.card_ids is not None, and return
+         without making changes if it has been set.
+         """,
+    ),
+    Hook(
+        name="browser_did_search",
+        args=["context: aqt.browser.SearchContext"],
+        doc="""Allows you to modify the list of returned card ids from a search.""",
     ),
     # States
     ###################
@@ -341,6 +365,7 @@ hooks = [
     ),
     # Main
     ###################
+    Hook(name="backup_did_complete"),
     Hook(name="profile_did_open", legacy_hook="profileLoaded"),
     Hook(name="profile_will_close", legacy_hook="unloadProfile"),
     Hook(
@@ -407,10 +432,23 @@ def emptyNewCard():
         args=["addcards: aqt.addcards.AddCards", "menu: QMenu"],
         legacy_hook="AddCards.onHistory",
     ),
+    Hook(name="add_cards_did_init", args=["addcards: aqt.addcards.AddCards"],),
     Hook(
         name="add_cards_did_add_note",
         args=["note: anki.notes.Note"],
         legacy_hook="AddCards.noteAdded",
+    ),
+    Hook(
+        name="add_cards_will_add_note",
+        args=["problem: Optional[str]", "note: anki.notes.Note"],
+        return_type="Optional[str]",
+        doc="""Decides whether the note should be added to the collection or
+        not. It is assumed to come from the addCards window.
+
+        reason_to_already_reject is the first reason to reject that
+        was found, or None. If your filter wants to reject, it should
+        replace return the reason to reject. Otherwise return the
+        input.""",
     ),
     # Editing
     ###################
@@ -460,6 +498,21 @@ def emptyNewCard():
         return_type="str",
         legacy_hook="mungeEditingFontName",
     ),
+    Hook(
+        name="editor_web_view_did_init",
+        args=["editor_web_view: aqt.editor.EditorWebView"],
+    ),
+    Hook(name="editor_did_init", args=["editor: aqt.editor.Editor"],),
+    Hook(
+        name="editor_will_load_note",
+        args=["js: str", "note: anki.notes.Note", "editor: aqt.editor.Editor"],
+        return_type="str",
+        doc="""Allows changing the javascript commands to load note before
+        executing it and do change in the QT editor.""",
+    ),
+    # Tag
+    ###################
+    Hook(name="tag_editor_did_process_key", args=["tag_edit: TagEdit", "evt: QEvent"]),
     # Sound/video
     ###################
     Hook(name="av_player_will_play", args=["tag: anki.sound.AVTag"]),
@@ -499,6 +552,9 @@ def emptyNewCard():
         args=["dialog: aqt.addons.AddonsDialog", "add_on: aqt.addons.AddonMeta"],
         doc="""Allows doing an action when a single add-on is selected.""",
     ),
+    # Model
+    ###################
+    Hook(name="models_advanced_will_show", args=["advanced: QDialog"],),
     # Other
     ###################
     Hook(

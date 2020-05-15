@@ -1,9 +1,8 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
 import os
 
 import setuptools
-
-with open("../meta/version") as fh:
-    version = fh.read().strip()
 
 
 def package_files(directory):
@@ -21,9 +20,24 @@ if pyonly:
 else:
     extra_files = package_files("aqt_data")
 
+install_requires = [
+    "beautifulsoup4",
+    "requests",
+    "send2trash",
+    "markdown",
+    "jsonschema",
+    # "pyaudio", # https://anki.tenderapp.com/discussions/add-ons/44009-problems-with-code-completion
+    # "pyqtwebengine", # https://github.com/ankitects/anki/pull/530 - Set to checks.yml install and import anki wheels
+    "pyqt5>=5.9",
+    'psutil; sys.platform == "win32"',
+    'pywin32; sys.platform == "win32"',
+    "anki==2.1.27",  # automatically updated 1
+]
+
+
 setuptools.setup(
     name="aqt",
-    version=version,
+    version="2.1.27",  # automatically updated 2
     author="Ankitects Pty Ltd",
     description="Anki's Qt GUI code",
     long_description="Anki's QT GUI code",
@@ -35,15 +49,5 @@ setuptools.setup(
     classifiers=[],
     python_requires=">=3.7",
     package_data={"aqt": ["py.typed"]},
-    install_requires=[
-        "beautifulsoup4",
-        "requests",
-        "send2trash",
-        "pyaudio",
-        "markdown",
-        "jsonschema",
-        'psutil; sys.platform == "win32"',
-        'pywin32; sys.platform == "win32"',
-        'darkdetect; sys.platform == "darwin"',
-    ],
+    install_requires=install_requires,
 )

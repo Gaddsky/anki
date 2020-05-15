@@ -26,7 +26,7 @@ class CustomStudy(QDialog):
         QDialog.__init__(self, mw)
         self.mw = mw
         self.deck = self.mw.col.decks.current()
-        self.conf = self.mw.col.decks.getConf(self.deck["conf"])
+        self.conf = self.mw.col.decks.get_config(self.deck["conf"])
         self.form = f = aqt.forms.customstudy.Ui_Dialog()
         self.created_custom_study = False
         f.setupUi(self)
@@ -37,12 +37,12 @@ class CustomStudy(QDialog):
 
     def setupSignals(self):
         f = self.form
-        f.radioNew.clicked.connect(lambda: self.onRadioChange(RADIO_NEW))
-        f.radioRev.clicked.connect(lambda: self.onRadioChange(RADIO_REV))
-        f.radioForgot.clicked.connect(lambda: self.onRadioChange(RADIO_FORGOT))
-        f.radioAhead.clicked.connect(lambda: self.onRadioChange(RADIO_AHEAD))
-        f.radioPreview.clicked.connect(lambda: self.onRadioChange(RADIO_PREVIEW))
-        f.radioCram.clicked.connect(lambda: self.onRadioChange(RADIO_CRAM))
+        qconnect(f.radioNew.clicked, lambda: self.onRadioChange(RADIO_NEW))
+        qconnect(f.radioRev.clicked, lambda: self.onRadioChange(RADIO_REV))
+        qconnect(f.radioForgot.clicked, lambda: self.onRadioChange(RADIO_FORGOT))
+        qconnect(f.radioAhead.clicked, lambda: self.onRadioChange(RADIO_AHEAD))
+        qconnect(f.radioPreview.clicked, lambda: self.onRadioChange(RADIO_PREVIEW))
+        qconnect(f.radioCram.clicked, lambda: self.onRadioChange(RADIO_CRAM))
 
     def onRadioChange(self, idx):
         f = self.form
@@ -109,6 +109,10 @@ class CustomStudy(QDialog):
         f.title.setVisible(not not tit)
         f.spin.setMinimum(smin)
         f.spin.setMaximum(smax)
+        if smax > 0:
+            f.spin.setEnabled(True)
+        else:
+            f.spin.setEnabled(False)
         f.spin.setValue(sval)
         f.preSpin.setText(pre)
         f.postSpin.setText(post)

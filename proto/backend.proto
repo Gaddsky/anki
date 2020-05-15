@@ -6,13 +6,14 @@ package backend_proto;
 
 message Empty {}
 
+message OptionalInt32 {
+    sint32 val = 1;
+}
+
 message BackendInit {
-    string collection_path = 1;
-    string media_folder_path = 2;
-    string media_db_path = 3;
-    repeated string preferred_langs = 4;
-    string locale_folder_path = 5;
-    string log_path = 6;
+    repeated string preferred_langs = 1;
+    string locale_folder_path = 2;
+    bool server = 3;
 }
 
 message I18nBackendInit {
@@ -27,8 +28,8 @@ message BackendInput {
         TemplateRequirementsIn template_requirements = 16;
         SchedTimingTodayIn sched_timing_today = 17;
         Empty deck_tree = 18;
-        FindCardsIn find_cards = 19;
-        BrowserRowsIn browser_rows = 20;
+        SearchCardsIn search_cards = 19;
+        SearchNotesIn search_notes = 20;
         RenderCardIn render_card = 21;
         int64 local_minutes_west = 22;
         string strip_av_tags = 23;
@@ -44,6 +45,30 @@ message BackendInput {
         CongratsLearnMsgIn congrats_learn_msg = 33;
         Empty empty_trash = 34;
         Empty restore_trash = 35;
+        OpenCollectionIn open_collection = 36;
+        CloseCollectionIn close_collection = 37;
+        int64 get_card = 38;
+        Card update_card = 39;
+        Card add_card = 40;
+        int64 get_deck_config = 41;
+        AddOrUpdateDeckConfigIn add_or_update_deck_config = 42;
+        Empty all_deck_config = 43;
+        Empty new_deck_config = 44;
+        int64 remove_deck_config = 45;
+        Empty abort_media_sync = 46;
+        Empty before_upload = 47;
+        RegisterTagsIn register_tags = 48;
+        string canonify_tags = 49;
+        Empty all_tags = 50;
+        int32 get_changed_tags = 51;
+        string get_config_json = 52;
+        SetConfigJson set_config_json = 53;
+        bytes set_all_config = 54;
+        Empty get_all_config = 55;
+        Empty get_all_notetypes = 56;
+        bytes set_all_notetypes = 57;
+        Empty get_all_decks = 58;
+        bytes set_all_decks = 59;
     }
 }
 
@@ -59,12 +84,13 @@ message BackendOutput {
         string format_time_span = 31;
         string studied_today = 32;
         string congrats_learn_msg = 33;
+        Empty abort_media_sync = 46;
 
         // fallible commands
         TemplateRequirementsOut template_requirements = 16;
         DeckTreeOut deck_tree = 18;
-        FindCardsOut find_cards = 19;
-        BrowserRowsOut browser_rows = 20;
+        SearchCardsOut search_cards = 19;
+        SearchNotesOut search_notes = 20;
         RenderCardOut render_card = 21;
         string add_media_file = 26;
         Empty sync_media = 27;
@@ -72,6 +98,29 @@ message BackendOutput {
         Empty trash_media_files = 29;
         Empty empty_trash = 34;
         Empty restore_trash = 35;
+        Empty open_collection = 36;
+        Empty close_collection = 37;
+        GetCardOut get_card = 38;
+        Empty update_card = 39;
+        int64 add_card = 40;
+        bytes get_deck_config = 41;
+        int64 add_or_update_deck_config = 42;
+        bytes all_deck_config = 43;
+        bytes new_deck_config = 44;
+        Empty remove_deck_config = 45;
+        Empty before_upload = 47;
+        bool register_tags = 48;
+        CanonifyTagsOut canonify_tags = 49;
+        AllTagsOut all_tags = 50;
+        GetChangedTagsOut get_changed_tags = 51;
+        bytes get_config_json = 52;
+        Empty set_config_json = 53;
+        Empty set_all_config = 54;
+        bytes get_all_config = 55;
+        bytes get_all_notetypes = 56;
+        Empty set_all_notetypes = 57;
+        bytes get_all_decks = 58;
+        Empty set_all_decks = 59;
 
         BackendError error = 2047;
     }
@@ -90,6 +139,7 @@ message BackendError {
         SyncError sync_error = 7;
         // user interrupted operation
         Empty interrupted = 8;
+        string json_error = 9;
     }
 }
 
@@ -162,10 +212,10 @@ message TemplateRequirementAny {
 
 message SchedTimingTodayIn {
     int64 created_secs = 1;
-    sint32 created_mins_west = 2;
-    int64 now_secs = 3;
-    sint32 now_mins_west = 4;
-    sint32 rollover_hour = 5;
+    int64 now_secs = 2;
+    OptionalInt32 created_mins_west = 3;
+    OptionalInt32 now_mins_west = 4;
+    OptionalInt32 rollover_hour = 5;
 }
 
 message SchedTimingTodayOut {
@@ -186,23 +236,6 @@ message DeckTreeNode {
     uint32 new_count = 5;
     repeated DeckTreeNode children = 6;
     bool collapsed = 7;
-}
-
-message FindCardsIn {
-    string search = 1;
-}
-
-message FindCardsOut {
-    repeated int64 card_ids = 1;
-}
-
-message BrowserRowsIn {
-    repeated int64 card_ids = 1;
-}
-
-message BrowserRowsOut {
-    // just sort fields for proof of concept
-    repeated string sort_fields = 1;
 }
 
 message RenderCardIn {
@@ -323,4 +356,126 @@ message StudiedTodayIn {
 message CongratsLearnMsgIn {
     float next_due = 1;
     uint32 remaining = 2;
+}
+
+message OpenCollectionIn {
+    string collection_path = 1;
+    string media_folder_path = 2;
+    string media_db_path = 3;
+    string log_path = 4;
+}
+
+message SearchCardsIn {
+    string search = 1;
+    SortOrder order = 2;
+}
+
+message SearchCardsOut {
+    repeated int64 card_ids = 1;
+
+}
+
+message SortOrder {
+    oneof value {
+        Empty from_config = 1;
+        Empty none = 2;
+        string custom = 3;
+        BuiltinSearchOrder builtin = 4;
+    }
+}
+
+message SearchNotesIn {
+    string search = 1;
+}
+
+message SearchNotesOut {
+    repeated int64 note_ids = 2;
+}
+
+message BuiltinSearchOrder {
+    enum BuiltinSortKind {
+        NOTE_CREATION = 0;
+        NOTE_MOD = 1;
+        NOTE_FIELD = 2;
+        NOTE_TAGS = 3;
+        NOTE_TYPE = 4;
+        CARD_MOD = 5;
+        CARD_REPS = 6;
+        CARD_DUE = 7;
+        CARD_EASE = 8;
+        CARD_LAPSES = 9;
+        CARD_INTERVAL = 10;
+        CARD_DECK = 11;
+        CARD_TEMPLATE = 12;
+    }
+    BuiltinSortKind kind = 1;
+    bool reverse = 2;
+}
+
+
+message GetCardOut {
+    Card card = 1;
+}
+
+message Card {
+    int64 id = 1;
+    int64 nid = 2;
+    int64 did = 3;
+    uint32 ord = 4;
+    int64 mtime = 5;
+    sint32 usn = 6;
+    uint32 ctype = 7;
+    sint32 queue = 8;
+    sint32 due = 9;
+    uint32 ivl = 10;
+    uint32 factor = 11;
+    uint32 reps = 12;
+    uint32 lapses = 13;
+    uint32 left = 14;
+    sint32 odue = 15;
+    int64 odid = 16;
+    uint32 flags = 17;
+    string data = 18;
+}
+
+message CloseCollectionIn {
+    bool downgrade_to_schema11 = 1;
+}
+
+message AddOrUpdateDeckConfigIn {
+    bytes config = 1;
+    bool preserve_usn_and_mtime = 2;
+}
+
+message RegisterTagsIn {
+    string tags = 1;
+    bool preserve_usn = 2;
+    int32 usn = 3;
+    bool clear_first = 4;
+}
+
+message AllTagsOut {
+    repeated TagUsnTuple tags = 1;
+}
+
+message TagUsnTuple {
+    string tag = 1;
+    sint32 usn = 2;
+}
+
+message GetChangedTagsOut {
+    repeated string tags = 1;
+}
+
+message CanonifyTagsOut {
+    string tags = 1;
+    bool tag_list_changed = 2;
+}
+
+message SetConfigJson {
+    string key = 1;
+    oneof op {
+        bytes val = 2;
+        Empty remove = 3;
+    }
 }

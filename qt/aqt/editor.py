@@ -63,9 +63,18 @@ _html = """
 html { background: %s; }
 #topbutsOuter { background: %s; }
 </style>
-<div id="topbutsOuter"><div id="topbuts" class="clearfix">%s</div></div>
-<div id="fields"></div>
-<div id="dupes" style="display:none;"><a href="#" onclick="pycmd('dupes');return false;">%s</a></div>
+<div id="topbutsOuter">
+    <div id="topbuts" class="clearfix">
+%s
+    </div>
+</div>
+<div id="fields">
+</div>
+<div id="dupes" style="display:none;">
+    <a href="#" onclick="pycmd('dupes');return false;">
+%s
+    </a>
+</div>
 """
 
 # caller is responsible for resetting note on reset
@@ -83,6 +92,7 @@ class Editor:
         self.setupWeb()
         self.setupShortcuts()
         self.setupTags()
+        gui_hooks.editor_did_init(self)
 
     # Initial setup
     ############################################################
@@ -117,20 +127,35 @@ class Editor:
         # The color selection buttons do not use an icon so the HTML must be specified manually
         tip = _("Set foreground colour (F7)")
         righttopbtns.append(
-            """<button tabindex=-1 class=linkb title="{}"
-            type="button" onclick="pycmd('colour');return false;">
-            <div id=forecolor style="display:inline-block; background: #000;border-radius: 5px;"
-            class=topbut></div></button>""".format(
+            """ <button tabindex=-1
+                        class=linkb
+                        title="{}"
+                        type="button"
+                        onclick="pycmd('colour'); return false;"
+                >
+                    <div id=forecolor
+                         style="display:inline-block; background: #000;border-radius: 5px;"
+                         class=topbut
+                    >
+                    </div>
+                </button>""".format(
                 tip
             )
         )
         tip = _("Change colour (F8)")
         righttopbtns.extend(
             [
-                """<button tabindex=-1 class=linkb title="{}"
-                type="button" onclick="pycmd('changeCol');return false;">
-                <div style="display:inline-block; border-radius: 5px;"
-                class="topbut rainbow"></div></button>""".format(
+                """<button tabindex=-1
+                        class=linkb
+                        title="{}"
+                        type="button"
+                        onclick="pycmd('changeCol');return false;"
+                >
+                    <div style="display:inline-block; border-radius: 5px;"
+                         class="topbut rainbow"
+                    >
+                    </div>
+                </button>""".format(
                     tip
                 ),
                 self._addButton(
@@ -196,7 +221,7 @@ class Editor:
         disables: bool = True,
     ):
         """Assign func to bridge cmd, register shortcut, return button"""
-        if cmd not in self._links:
+        if func:
             self._links[cmd] = func
         if keys:
             QShortcut(  # type: ignore
@@ -249,18 +274,23 @@ class Editor:
         theclass = "linkb"
         if not disables:
             theclass += " perm"
-        return (
-            '''<button tabindex=-1 {id} class="{theclass}" type="button" title="{tip}"'''
-            """ onclick="pycmd('{cmd}');{togglesc}return false;">"""
-            """{imgelm}{labelelm}</button>""".format(
-                imgelm=imgelm,
-                cmd=cmd,
-                tip=tip,
-                labelelm=labelelm,
-                id=idstr,
-                togglesc=toggleScript,
-                theclass=theclass,
-            )
+        return """ <button tabindex=-1
+                        {id}
+                        class="{theclass}"
+                        type="button"
+                        title="{tip}"
+                        onclick="pycmd('{cmd}');{togglesc}return false;"
+                >
+                    {imgelm}
+                    {labelelm}
+                </button>""".format(
+            imgelm=imgelm,
+            cmd=cmd,
+            tip=tip,
+            labelelm=labelelm,
+            id=idstr,
+            togglesc=toggleScript,
+            theclass=theclass,
         )
 
     def setupShortcuts(self) -> None:
@@ -426,6 +456,7 @@ class Editor:
             json.dumps(focusTo),
             json.dumps(self.note.id),
         )
+        js = gui_hooks.editor_will_load_note(js, self.note, self)
         self.web.evalWithCallback(js, oncallback)
 
     def fonts(self) -> List[Tuple[str, int, bool]]:
@@ -466,9 +497,10 @@ class Editor:
             return True
         m = self.note.model()
         for c, f in enumerate(self.note.fields):
+            f = f.replace("<br>", "").strip()
             notChangedvalues = {"", "<br>"}
             if previousNote and m["flds"][c]["sticky"]:
-                notChangedvalues.add(previousNote.fields[c])
+                notChangedvalues.add(previousNote.fields[c].replace("<br>", "").strip())
             if f not in notChangedvalues:
                 return False
         return True
@@ -489,7 +521,7 @@ class Editor:
         d = QDialog(self.widget)
         form = aqt.forms.edithtml.Ui_Dialog()
         form.setupUi(d)
-        form.buttonBox.helpRequested.connect(lambda: openHelp("editor"))
+        qconnect(form.buttonBox.helpRequested, lambda: openHelp("editor"))
         form.textEdit.setPlainText(self.note.fields[field])
         d.show()
         form.textEdit.moveCursor(QTextCursor.End)
@@ -521,7 +553,7 @@ class Editor:
         l = QLabel(_("Tags"))
         tb.addWidget(l, 1, 0)
         self.tags = aqt.tagedit.TagEdit(self.widget)
-        self.tags.lostFocus.connect(self.saveTags)
+        qconnect(self.tags.lostFocus, self.saveTags)
         self.tags.setToolTip(shortcut(_("Jump to tags with Ctrl+Shift+T")))
         border = theme_manager.str_color("border")
         self.tags.setStyleSheet(f"border: 1px solid {border}")
@@ -889,7 +921,7 @@ to a cloze type first, via Edit>Change Note Type."""
             (_("Edit HTML"), self.onHtmlEdit, "Ctrl+Shift+X"),
         ):
             a = m.addAction(text)
-            a.triggered.connect(handler)
+            qconnect(a.triggered, handler)
             a.setShortcut(QKeySequence(shortcut))
 
         qtMenuShortcutWorkaround(m)
@@ -953,7 +985,8 @@ class EditorWebView(AnkiWebView):
         self.setAcceptDrops(True)
         self._markInternal = False
         clip = self.editor.mw.app.clipboard()
-        clip.dataChanged.connect(self._onClipboardChange)
+        qconnect(clip.dataChanged, self._onClipboardChange)
+        gui_hooks.editor_web_view_did_init(self)
 
     def _onClipboardChange(self):
         if self._markInternal:

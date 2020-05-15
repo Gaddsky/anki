@@ -39,7 +39,12 @@ function _updateQA(html, fadeTime, onupdate, onshown) {
         try {
             qa.html(html);
         } catch (err) {
-            qa.text("Invalid HTML on card: " + err);
+            qa.html(
+                (
+                    `Invalid HTML on card: ${String(err).substring(0, 2000)}\n` +
+                    String(err.stack).substring(0, 2000)
+                ).replace(/\n/g, "<br />")
+            );
         }
         _runHook(onUpdateHook);
 

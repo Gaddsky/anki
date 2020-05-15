@@ -274,10 +274,7 @@ function enableButtons() {
 
 // disable the buttons if a field is not currently focused
 function maybeDisableButtons() {
-    if (
-        !document.activeElement ||
-        document.activeElement.className !== "field"
-    ) {
+    if (!document.activeElement || document.activeElement.className !== "field") {
         disableButtons();
     } else {
         enableButtons();
@@ -333,20 +330,33 @@ function setFields(fields) {
         if (!f) {
             f = "<br>";
         }
-        txt += `<tr><td class=fname>${n}</td></tr><tr><td width=100%>`;
-        txt += `<div id=f${i} onkeydown='onKey(window.event);' oninput='onInput()' onmouseup='onKey(window.event);'`;
-        txt +=
-            " onfocus='onFocus(this);' onblur='onBlur();' class='field clearfix' ";
-        txt += "ondragover='onDragOver(this);' onpaste='onPaste(this);' ";
-        txt += "oncopy='onCutOrCopy(this);' oncut='onCutOrCopy(this);' ";
-        txt += `contentEditable=true class=field>${f}</div>`;
-        txt += "</td></tr>";
+        txt += `
+        <tr>
+            <td class=fname id="name${i}">${n}</td>
+        </tr>
+        <tr>
+            <td width=100%>
+                <div id=f${i}
+                     onkeydown='onKey(window.event);'
+                     oninput='onInput();'
+                     onmouseup='onKey(window.event);'
+                     onfocus='onFocus(this);'
+                     onblur='onBlur();'
+                     class='field clearfix'
+                     ondragover='onDragOver(this);'
+                     onpaste='onPaste(this);'
+                     oncopy='onCutOrCopy(this);'
+                     oncut='onCutOrCopy(this);'
+                     contentEditable=true
+                     class=field
+                >${f}</div>
+            </td>
+        </tr>`;
     }
-    $("#fields").html(
-        "<table cellpadding=0 width=100% style='table-layout: fixed;'>" +
-            txt +
-            "</table>"
-    );
+    $("#fields").html(`
+    <table cellpadding=0 width=100% style='table-layout: fixed;'>
+${txt}
+    </table>`);
     maybeDisableButtons();
 }
 

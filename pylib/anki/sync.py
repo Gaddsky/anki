@@ -8,13 +8,12 @@ import io
 import json
 import os
 import random
-import sqlite3
-from typing import Any, Dict, List, Optional, Tuple, Union
+from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
 
 import anki
 from anki.consts import *
 from anki.db import DB
-from anki.utils import checksum, devMode, ids2str, intTime, platDesc, versionWithBuild
+from anki.utils import checksum, ids2str, intTime, platDesc, versionWithBuild
 
 from . import hooks
 from .httpclient import HttpClient
@@ -32,7 +31,7 @@ class UnexpectedSchemaChange(Exception):
 
 
 class Syncer:
-    cursor: Optional[sqlite3.Cursor]
+    chunkRows: Optional[List[Sequence]]
 
     def __init__(self, col: anki.storage._Collection, server=None) -> None:
         self.col = col.weakref()
@@ -207,8 +206,8 @@ class Syncer:
         for g in self.col.decks.all():
             if g["usn"] == -1:
                 return "deck had usn = -1"
-        for t, usn in self.col.tags.allItems():
-            if usn == -1:
+        for tup in self.col.backend.all_tags():
+            if tup.usn == -1:
                 return "tag had usn = -1"
         found = False
         for m in self.col.models.all():
@@ -247,11 +246,11 @@ class Syncer:
 
     def prepareToChunk(self) -> None:
         self.tablesLeft = ["revlog", "cards", "notes"]
-        self.cursor = None
+        self.chunkRows = None
 
-    def cursorForTable(self, table) -> sqlite3.Cursor:
+    def getChunkRows(self, table) -> List[Sequence]:
         lim = self.usnLim()
-        x = self.col.db.execute
+        x = self.col.db.all
         d = (self.maxUsn, lim)
         if table == "revlog":
             return x(
@@ -280,14 +279,15 @@ from notes where %s"""
         lim = 250
         while self.tablesLeft and lim:
             curTable = self.tablesLeft[0]
-            if not self.cursor:
-                self.cursor = self.cursorForTable(curTable)
-            rows = self.cursor.fetchmany(lim)
+            if self.chunkRows is None:
+                self.chunkRows = self.getChunkRows(curTable)
+            rows = self.chunkRows[:lim]
+            self.chunkRows = self.chunkRows[lim:]
             fetched = len(rows)
             if fetched != lim:
                 # table is empty
                 self.tablesLeft.pop(0)
-                self.cursor = None
+                self.chunkRows = None
                 # mark the objects as having been sent
                 self.col.db.execute(
                     "update %s set usn=? where usn=-1" % curTable, self.maxUsn
@@ -374,9 +374,10 @@ from notes where %s"""
         decks = [g for g in self.col.decks.all() if g["usn"] == -1]
         for g in decks:
             g["usn"] = self.maxUsn
-        dconf = [g for g in self.col.decks.allConf() if g["usn"] == -1]
+        dconf = [g for g in self.col.decks.all_config() if g["usn"] == -1]
         for g in dconf:
             g["usn"] = self.maxUsn
+            self.col.decks.update_config(g, preserve_usn=True)
         self.col.decks.save()
         return [decks, dconf]
 
@@ -392,24 +393,18 @@ from notes where %s"""
                 self.col.decks.update(r)
         for r in rchg[1]:
             try:
-                l = self.col.decks.getConf(r["id"])
+                l = self.col.decks.get_config(r["id"])
             except KeyError:
                 l = None
             # if missing locally or server is newer, update
             if not l or r["mod"] > l["mod"]:
-                self.col.decks.updateConf(r)
+                self.col.decks.update_config(r)
 
     # Tags
     ##########################################################################
 
     def getTags(self) -> List:
-        tags = []
-        for t, usn in self.col.tags.allItems():
-            if usn == -1:
-                self.col.tags.tags[t] = self.maxUsn
-                tags.append(t)
-        self.col.tags.save()
-        return tags
+        return self.col.backend.get_changed_tags(self.maxUsn)
 
     def mergeTags(self, tags) -> None:
         self.col.tags.register(tags, usn=self.maxUsn)
@@ -454,11 +449,11 @@ from notes where %s"""
     # Col config
     ##########################################################################
 
-    def getConf(self) -> Any:
-        return self.col.conf
+    def getConf(self) -> Dict[str, Any]:
+        return self.col.backend.get_all_config()
 
-    def mergeConf(self, conf) -> None:
-        self.col.conf = conf
+    def mergeConf(self, conf: Dict[str, Any]) -> None:
+        self.col.backend.set_all_config(conf)
 
 
 # HTTP syncing tools
@@ -475,10 +470,7 @@ class HttpSyncer:
         self.prefix = "sync/"
 
     def syncURL(self) -> str:
-        if devMode:
-            url = "https://l1sync.ankiweb.net/"
-        else:
-            url = SYNC_BASE % (self.hostNum or "")
+        url = SYNC_BASE % (self.hostNum or "")
         return url + self.prefix
 
     def assertOk(self, resp) -> None:
@@ -643,7 +635,7 @@ class FullSyncer(HttpSyncer):
     def download(self) -> Optional[str]:
         hooks.sync_stage_did_change("download")
         localNotEmpty = self.col.db.scalar("select 1 from cards")
-        self.col.close()
+        self.col.close(downgrade=False)
         cont = self.req("download")
         tpath = self.col.path + ".tmp"
         if cont == "upgradeRequired":

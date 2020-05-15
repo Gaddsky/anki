@@ -7,6 +7,7 @@ import aqt.deckchooser
 import aqt.editor
 import aqt.forms
 import aqt.modelchooser
+from anki.consts import MODEL_CLOZE
 from anki.lang import _
 from anki.notes import Note
 from anki.utils import htmlToTextLine, isMac
@@ -46,6 +47,7 @@ class AddCards(QDialog):
         gui_hooks.state_did_reset.append(self.onReset)
         gui_hooks.current_note_type_did_change.append(self.onModelChange)
         addCloseShortcut(self)
+        gui_hooks.add_cards_did_init(self)
         self.show()
 
     def setupEditor(self) -> None:
@@ -63,7 +65,7 @@ class AddCards(QDialog):
         ar = QDialogButtonBox.ActionRole
         # add
         self.addButton = bb.addButton(_("Add"), ar)
-        self.addButton.clicked.connect(self.addCards)
+        qconnect(self.addButton.clicked, self.addCards)
         self.addButton.setShortcut(QKeySequence("Ctrl+Return"))
         self.addButton.setToolTip(shortcut(_("Add (shortcut: ctrl+enter)")))
         # close
@@ -82,7 +84,7 @@ class AddCards(QDialog):
             sc = "Ctrl+H"
         b.setShortcut(QKeySequence(sc))
         b.setToolTip(_("Shortcut: %s") % shortcut(sc))
-        b.clicked.connect(self.onHistory)
+        qconnect(b.clicked, self.onHistory)
         b.setEnabled(False)
         self.historyButton = b
 
@@ -98,21 +100,18 @@ class AddCards(QDialog):
             newFields = list(note.keys())
             for n, f in enumerate(note.model()["flds"]):
                 fieldName = f["name"]
-                try:
-                    oldFieldName = oldNote.model()["flds"][n]["name"]
-                except IndexError:
-                    oldFieldName = None
                 # copy identical fields
                 if fieldName in oldFields:
                     note[fieldName] = oldNote[fieldName]
-                # set non-identical fields by field index
-                elif oldFieldName and oldFieldName not in newFields:
-                    try:
+                elif n < len(oldNote.model()["flds"]):
+                    # set non-identical fields by field index
+                    oldFieldName = oldNote.model()["flds"][n]["name"]
+                    if oldFieldName not in newFields:
                         note.fields[n] = oldNote.fields[n]
-                    except IndexError:
-                        pass
             self.removeTempNote(oldNote)
-        self.editor.setNote(note)
+        self.editor.note = note
+        # When on model change is called, reset is necessarily called.
+        # Reset load note, so it is not required to load it here.
 
     def onReset(self, model: None = None, keep: bool = False) -> None:
         oldNote = self.editor.note
@@ -122,14 +121,9 @@ class AddCards(QDialog):
         if oldNote:
             if not keep:
                 self.removeTempNote(oldNote)
-            for n in range(len(note.fields)):
-                try:
-                    if not keep or flds[n]["sticky"]:
-                        note.fields[n] = oldNote.fields[n]
-                    else:
-                        note.fields[n] = ""
-                except IndexError:
-                    break
+            for n in range(min(len(note.fields), len(oldNote.fields))):
+                if not keep or flds[n]["sticky"]:
+                    note.fields[n] = oldNote.fields[n]
         self.setAndFocusNote(note)
 
     def removeTempNote(self, note: Note) -> None:
@@ -167,10 +161,14 @@ class AddCards(QDialog):
     def addNote(self, note) -> Optional[Note]:
         note.model()["did"] = self.deckChooser.selectedId()
         ret = note.dupeOrEmpty()
+        problem = None
         if ret == 1:
-            showWarning(_("The first field is empty."), help="AddItems#AddError")
+            problem = _("The first field is empty.")
+        problem = gui_hooks.add_cards_will_add_note(problem, note)
+        if problem is not None:
+            showWarning(problem, help="AddItems#AddError")
             return None
-        if "{{cloze:" in note.model()["tmpls"][0]["qfmt"]:
+        if note.model()["type"] == MODEL_CLOZE:
             if not self.mw.col.models._availClozeOrds(
                 note.model(), note.joinedFields(), False
             ):

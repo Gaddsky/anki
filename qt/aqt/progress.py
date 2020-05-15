@@ -11,10 +11,6 @@ import aqt.forms
 from anki.lang import _
 from aqt.qt import *
 
-# fixme: if mw->subwindow opens a progress dialog with mw as the parent, mw
-# gets raised on finish on compiz. perhaps we should be using the progress
-# dialog as the parent?
-
 # Progress info
 ##########################################################################
 
@@ -25,47 +21,18 @@ class ProgressManager:
         self.app = QApplication.instance()
         self.inDB = False
         self.blockUpdates = False
+        self._show_timer: Optional[QTimer] = None
         self._win = None
         self._levels = 0
 
-    # SQLite progress handler
-    ##########################################################################
-
-    def setupDB(self, db):
-        "Install a handler in the current DB."
-        self.lastDbProgress = 0
-        self.inDB = False
-        db.set_progress_handler(self._dbProgress, 10000)
-
-    def _dbProgress(self):
-        "Called from SQLite."
-        # do nothing if we don't have a progress window
-        if not self._win:
-            return
-        # make sure we're not executing too frequently
-        if (time.time() - self.lastDbProgress) < 0.01:
-            return
-        self.lastDbProgress = time.time()
-        # and we're in the main thread
-        if not self.mw.inMainThread():
-            return
-        # ensure timers don't fire
-        self.inDB = True
-        # handle GUI events
-        if not self.blockUpdates:
-            self._maybeShow()
-            self.app.processEvents(QEventLoop.ExcludeUserInputEvents)
-        self.inDB = False
-
     # Safer timers
     ##########################################################################
-    # QTimer may fire in processEvents(). We provide a custom timer which
-    # automatically defers until the DB is not busy, and avoids running
-    # while a progress window is visible.
+    # A custom timer which avoids firing while a progress dialog is active
+    # (likely due to some long-running DB operation)
 
     def timer(self, ms, func, repeat, requiresCollection=True):
         def handler():
-            if self.inDB or self._levels:
+            if self._levels:
                 # retry in 100ms
                 self.timer(100, func, False, requiresCollection)
             elif not self.mw.col and requiresCollection:
@@ -78,7 +45,7 @@ class ProgressManager:
         t = QTimer(self.mw)
         if not repeat:
             t.setSingleShot(True)
-        t.timeout.connect(handler)
+        qconnect(t.timeout, handler)
         t.start(ms)
         return t
 
@@ -107,17 +74,24 @@ class ProgressManager:
         self._win.setWindowModality(Qt.ApplicationModal)
         self._win.setMinimumWidth(300)
         self._setBusy()
-        self._shown = False
+        self._shown = 0
         self._counter = min
         self._min = min
         self._max = max
         self._firstTime = time.time()
         self._lastUpdate = time.time()
         self._updating = False
+        self._show_timer = QTimer(self.mw)
+        self._show_timer.setSingleShot(True)
+        self._show_timer.start(600)
+        qconnect(self._show_timer.timeout, self._on_show_timer)
         return self._win
 
-    def update(self, label=None, value=None, process=True, maybeShow=True):
+    def update(self, label=None, value=None, process=True, maybeShow=True) -> None:
         # print self._min, self._counter, self._max, label, time.time() - self._lastTime
+        if not self.mw.inMainThread():
+            print("progress.update() called on wrong thread")
+            return
         if self._updating:
             return
         if maybeShow:
@@ -143,6 +117,9 @@ class ProgressManager:
             if self._win:
                 self._closeWin()
             self._unsetBusy()
+            if self._show_timer:
+                self._show_timer.stop()
+                self._show_timer = None
 
     def clear(self):
         "Restore the interface after an error."
@@ -164,7 +141,7 @@ class ProgressManager:
         self._shown = time.time()
         self._win.show()
 
-    def _closeWin(self):
+    def _closeWin(self) -> None:
         if self._shown:
             while True:
                 # give the window system a second to present
@@ -177,7 +154,7 @@ class ProgressManager:
                 self.app.processEvents(QEventLoop.ExcludeUserInputEvents)
         self._win.cancel()
         self._win = None
-        self._shown = False
+        self._shown = 0
 
     def _setBusy(self):
         self.mw.app.setOverrideCursor(QCursor(Qt.WaitCursor))
@@ -188,6 +165,10 @@ class ProgressManager:
     def busy(self):
         "True if processing."
         return self._levels
+
+    def _on_show_timer(self):
+        self._show_timer = None
+        self._showWin()
 
 
 class ProgressDialog(QDialog):

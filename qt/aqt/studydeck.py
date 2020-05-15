@@ -3,6 +3,7 @@
 # License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
 
 import aqt
+from anki.decks import DeckManager
 from anki.lang import _
 from aqt import gui_hooks
 from aqt.qt import *
@@ -47,11 +48,14 @@ class StudyDeck(QDialog):
             b.setShortcut(QKeySequence("Ctrl+N"))
             b.setToolTip(shortcut(_("Add New Deck (Ctrl+N)")))
             self.form.buttonBox.addButton(b, QDialogButtonBox.ActionRole)
-            b.clicked.connect(self.onAddDeck)
+            qconnect(b.clicked, self.onAddDeck)
         if title:
             self.setWindowTitle(title)
         if not names:
-            names = sorted(self.mw.col.decks.allNames(dyn=dyn, force_default=False))
+            names = sorted(
+                self.mw.col.decks.allNames(dyn=dyn, force_default=False),
+                key=DeckManager._path,
+            )
             self.nameFunc = None
             self.origNames = names
         else:
@@ -62,9 +66,9 @@ class StudyDeck(QDialog):
             accept or _("Study"), QDialogButtonBox.AcceptRole
         )
         self.setWindowModality(Qt.WindowModal)
-        self.form.buttonBox.helpRequested.connect(lambda: openHelp(help))
-        self.form.filter.textEdited.connect(self.redraw)
-        self.form.list.itemDoubleClicked.connect(self.accept)
+        qconnect(self.form.buttonBox.helpRequested, lambda: openHelp(help))
+        qconnect(self.form.filter.textEdited, self.redraw)
+        qconnect(self.form.list.itemDoubleClicked, self.accept)
         self.show()
         # redraw after show so position at center correct
         self.redraw("", current)

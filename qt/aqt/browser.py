@@ -5,22 +5,22 @@
 from __future__ import annotations
 
 import html
-import json
-import re
 import sre_constants
 import time
 import unicodedata
 from dataclasses import dataclass
 from enum import Enum
 from operator import itemgetter
-from typing import Callable, List, Optional, Union
+from typing import Callable, List, Optional, Sequence, Union
 
 import anki
+import aqt
 import aqt.forms
 from anki import hooks
 from anki.cards import Card
 from anki.collection import _Collection
 from anki.consts import *
+from anki.decks import DeckManager
 from anki.lang import _, ngettext
 from anki.models import NoteType
 from anki.notes import Note
@@ -29,8 +29,8 @@ from anki.utils import htmlToTextLine, ids2str, intTime, isMac, isWin
 from aqt import AnkiQt, gui_hooks
 from aqt.editor import Editor
 from aqt.exporting import ExportDialog
+from aqt.previewer import BrowserPreviewer as PreviewDialog
 from aqt.qt import *
-from aqt.sound import av_player, play_clicked_audio
 from aqt.theme import theme_manager
 from aqt.utils import (
     MenuList,
@@ -58,15 +58,17 @@ from aqt.webview import AnkiWebView
 
 
 @dataclass
-class PreviewDialog:
+class FindDupesDialog:
     dialog: QDialog
     browser: Browser
 
 
 @dataclass
-class FindDupesDialog:
-    dialog: QDialog
-    browser: Browser
+class SearchContext:
+    search: str
+    order: Union[bool, str] = True
+    # if set, provided card ids will be used instead of the regular search
+    card_ids: Optional[Sequence[int]] = None
 
 
 # Data model
@@ -79,13 +81,13 @@ class DataModel(QAbstractTableModel):
         self.browser = browser
         self.col = browser.col
         self.sortKey = None
-        self.activeCols = self.col.conf.get(
+        self.activeCols = self.col.get_config(
             "activeCols", ["noteFld", "template", "cardDue", "deck"]
         )
-        self.cards: List[int] = []
+        self.cards: Sequence[int] = []
         self.cardObjs: Dict[int, Card] = {}
 
-    def getCard(self, index):
+    def getCard(self, index: QModelIndex) -> Card:
         id = self.cards[index.row()]
         if not id in self.cardObjs:
             self.cardObjs[id] = self.col.getCard(id)
@@ -138,6 +140,7 @@ class DataModel(QAbstractTableModel):
                 "deck",
                 "noteFld",
                 "note",
+                "noteTags",
             ):
                 align |= Qt.AlignHCenter
             return align
@@ -169,23 +172,22 @@ class DataModel(QAbstractTableModel):
     # Filtering
     ######################################################################
 
-    def search(self, txt):
+    def search(self, txt: str) -> None:
         self.beginReset()
-        t = time.time()
-        # the db progress handler may cause a refresh, so we need to zero out
-        # old data first
         self.cards = []
         invalid = False
         try:
-            self.cards = self.col.findCards(txt, order=True)
+            ctx = SearchContext(search=txt)
+            gui_hooks.browser_will_search(ctx)
+            if ctx.card_ids is None:
+                ctx.card_ids = self.col.find_cards(txt, order=ctx.order)
+            gui_hooks.browser_did_search(ctx)
+            self.cards = ctx.card_ids
         except Exception as e:
-            if str(e) == "invalidSearch":
-                self.cards = []
-                invalid = True
-            else:
-                raise
-        # print "fetch cards in %dms" % ((time.time() - t)*1000)
-        self.endReset()
+            print("search failed:", e)
+            invalid = True
+        finally:
+            self.endReset()
 
         if invalid:
             showWarning(_("Invalid search - please check for typing mistakes."))
@@ -213,7 +215,7 @@ class DataModel(QAbstractTableModel):
 
     def _reverse(self):
         self.beginReset()
-        self.cards.reverse()
+        self.cards = list(reversed(self.cards))
         self.endReset()
 
     def saveSelection(self):
@@ -253,11 +255,14 @@ class DataModel(QAbstractTableModel):
         idx = focusedIdx or firstIdx
         tv = self.browser.form.tableView
         if idx:
-            tv.selectRow(idx.row())
-            # scroll if the selection count has changed
-            if count != len(self.selectedCards):
-                # we save and then restore the horizontal scroll position because
-                # scrollTo() also scrolls horizontally which is confusing
+            row = idx.row()
+            pos = tv.rowViewportPosition(row)
+            visible = pos >= 0 and pos < tv.viewport().height()
+            tv.selectRow(row)
+
+            # we save and then restore the horizontal scroll position because
+            # scrollTo() also scrolls horizontally which is confusing
+            if not visible:
                 h = tv.horizontalScrollBar().value()
                 tv.scrollTo(idx, tv.PositionAtCenter)
                 tv.horizontalScrollBar().setValue(h)
@@ -274,6 +279,9 @@ class DataModel(QAbstractTableModel):
 
     def columnType(self, column):
         return self.activeCols[column]
+
+    def time_format(self):
+        return "%Y-%m-%d"
 
     def columnData(self, index):
         row = index.row()
@@ -302,11 +310,11 @@ class DataModel(QAbstractTableModel):
                 t = "(" + t + ")"
             return t
         elif type == "noteCrt":
-            return time.strftime("%Y-%m-%d", time.localtime(c.note().id / 1000))
+            return time.strftime(self.time_format(), time.localtime(c.note().id / 1000))
         elif type == "noteMod":
-            return time.strftime("%Y-%m-%d", time.localtime(c.note().mod))
+            return time.strftime(self.time_format(), time.localtime(c.note().mod))
         elif type == "cardMod":
-            return time.strftime("%Y-%m-%d", time.localtime(c.mod))
+            return time.strftime(self.time_format(), time.localtime(c.mod))
         elif type == "cardReps":
             return str(c.reps)
         elif type == "cardLapses":
@@ -316,13 +324,13 @@ class DataModel(QAbstractTableModel):
         elif type == "note":
             return c.model()["name"]
         elif type == "cardIvl":
-            if c.type == 0:
+            if c.type == CARD_TYPE_NEW:
                 return _("(new)")
-            elif c.type == 1:
+            elif c.type == CARD_TYPE_LRN:
                 return _("(learning)")
             return self.col.backend.format_time_span(c.ivl * 86400)
         elif type == "cardEase":
-            if c.type == 0:
+            if c.type == CARD_TYPE_NEW:
                 return _("(new)")
             return "%d%%" % (c.factor / 10)
         elif type == "deck":
@@ -363,7 +371,7 @@ class DataModel(QAbstractTableModel):
             date = time.time() + ((c.due - self.col.sched.today) * 86400)
         else:
             return ""
-        return time.strftime("%Y-%m-%d", time.localtime(date))
+        return time.strftime(self.time_format(), time.localtime(date))
 
     def isRTL(self, index):
         col = index.column()
@@ -388,15 +396,12 @@ class StatusDelegate(QItemDelegate):
         self.model = model
 
     def paint(self, painter, option, index):
-        self.browser.mw.progress.blockUpdates = True
         try:
             c = self.model.getCard(index)
         except:
             # in the the middle of a reset; return nothing so this row is not
             # rendered until we have a chance to reset the model
             return
-        finally:
-            self.browser.mw.progress.blockUpdates = True
 
         if self.model.isRTL(index):
             option.direction = Qt.RightToLeft
@@ -406,7 +411,7 @@ class StatusDelegate(QItemDelegate):
             col = theme_manager.qcolor(f"flag{c.userFlag()}-bg")
         elif c.note().hasTag("Marked"):
             col = theme_manager.qcolor("marked-bg")
-        elif c.queue == -1:
+        elif c.queue == QUEUE_TYPE_SUSPENDED:
             col = theme_manager.qcolor("suspended-bg")
         if col:
             brush = QBrush(col)
@@ -577,7 +582,7 @@ class Browser(QMainWindow):
         self.col = self.mw.col
         self.lastFilter = ""
         self.focusTo = None
-        self._previewWindow = None
+        self._previewer = None
         self._closeEventHasCleanedUp = False
         self.form = aqt.forms.browser.Ui_Dialog()
         self.form.setupUi(self)
@@ -603,53 +608,53 @@ class Browser(QMainWindow):
         # pylint: disable=unnecessary-lambda
         # actions
         f = self.form
-        f.previewButton.clicked.connect(self.onTogglePreview)
+        qconnect(f.previewButton.clicked, self.onTogglePreview)
         f.previewButton.setToolTip(
             _("Preview Selected Card (%s)") % shortcut("Ctrl+Shift+P")
         )
         f.previewButton.setShortcut("Ctrl+Shift+P")
 
-        f.filter.clicked.connect(self.onFilterButton)
+        qconnect(f.filter.clicked, self.onFilterButton)
         # edit
-        f.actionUndo.triggered.connect(self.mw.onUndo)
-        f.actionInvertSelection.triggered.connect(self.invertSelection)
-        f.actionSelectNotes.triggered.connect(self.selectNotes)
+        qconnect(f.actionUndo.triggered, self.mw.onUndo)
+        qconnect(f.actionInvertSelection.triggered, self.invertSelection)
+        qconnect(f.actionSelectNotes.triggered, self.selectNotes)
         if not isMac:
             f.actionClose.setVisible(False)
         # notes
-        f.actionAdd.triggered.connect(self.mw.onAddCard)
-        f.actionAdd_Tags.triggered.connect(lambda: self.addTags())
-        f.actionRemove_Tags.triggered.connect(lambda: self.deleteTags())
-        f.actionClear_Unused_Tags.triggered.connect(self.clearUnusedTags)
-        f.actionToggle_Mark.triggered.connect(lambda: self.onMark())
-        f.actionChangeModel.triggered.connect(self.onChangeModel)
-        f.actionFindDuplicates.triggered.connect(self.onFindDupes)
-        f.actionFindReplace.triggered.connect(self.onFindReplace)
-        f.actionManage_Note_Types.triggered.connect(self.mw.onNoteTypes)
-        f.actionDelete.triggered.connect(self.deleteNotes)
+        qconnect(f.actionAdd.triggered, self.mw.onAddCard)
+        qconnect(f.actionAdd_Tags.triggered, lambda: self.addTags())
+        qconnect(f.actionRemove_Tags.triggered, lambda: self.deleteTags())
+        qconnect(f.actionClear_Unused_Tags.triggered, self.clearUnusedTags)
+        qconnect(f.actionToggle_Mark.triggered, lambda: self.onMark())
+        qconnect(f.actionChangeModel.triggered, self.onChangeModel)
+        qconnect(f.actionFindDuplicates.triggered, self.onFindDupes)
+        qconnect(f.actionFindReplace.triggered, self.onFindReplace)
+        qconnect(f.actionManage_Note_Types.triggered, self.mw.onNoteTypes)
+        qconnect(f.actionDelete.triggered, self.deleteNotes)
         # cards
-        f.actionChange_Deck.triggered.connect(self.setDeck)
-        f.action_Info.triggered.connect(self.showCardInfo)
-        f.actionReposition.triggered.connect(self.reposition)
-        f.actionReschedule.triggered.connect(self.reschedule)
-        f.actionToggle_Suspend.triggered.connect(self.onSuspend)
-        f.actionRed_Flag.triggered.connect(lambda: self.onSetFlag(1))
-        f.actionOrange_Flag.triggered.connect(lambda: self.onSetFlag(2))
-        f.actionGreen_Flag.triggered.connect(lambda: self.onSetFlag(3))
-        f.actionBlue_Flag.triggered.connect(lambda: self.onSetFlag(4))
-        f.actionExport.triggered.connect(lambda: self._on_export_notes())
+        qconnect(f.actionChange_Deck.triggered, self.setDeck)
+        qconnect(f.action_Info.triggered, self.showCardInfo)
+        qconnect(f.actionReposition.triggered, self.reposition)
+        qconnect(f.actionReschedule.triggered, self.reschedule)
+        qconnect(f.actionToggle_Suspend.triggered, self.onSuspend)
+        qconnect(f.actionRed_Flag.triggered, lambda: self.onSetFlag(1))
+        qconnect(f.actionOrange_Flag.triggered, lambda: self.onSetFlag(2))
+        qconnect(f.actionGreen_Flag.triggered, lambda: self.onSetFlag(3))
+        qconnect(f.actionBlue_Flag.triggered, lambda: self.onSetFlag(4))
+        qconnect(f.actionExport.triggered, lambda: self._on_export_notes())
         # jumps
-        f.actionPreviousCard.triggered.connect(self.onPreviousCard)
-        f.actionNextCard.triggered.connect(self.onNextCard)
-        f.actionFirstCard.triggered.connect(self.onFirstCard)
-        f.actionLastCard.triggered.connect(self.onLastCard)
-        f.actionFind.triggered.connect(self.onFind)
-        f.actionNote.triggered.connect(self.onNote)
-        f.actionTags.triggered.connect(self.onFilterButton)
-        f.actionSidebar.triggered.connect(self.focusSidebar)
-        f.actionCardList.triggered.connect(self.onCardList)
+        qconnect(f.actionPreviousCard.triggered, self.onPreviousCard)
+        qconnect(f.actionNextCard.triggered, self.onNextCard)
+        qconnect(f.actionFirstCard.triggered, self.onFirstCard)
+        qconnect(f.actionLastCard.triggered, self.onLastCard)
+        qconnect(f.actionFind.triggered, self.onFind)
+        qconnect(f.actionNote.triggered, self.onNote)
+        qconnect(f.actionTags.triggered, self.onFilterButton)
+        qconnect(f.actionSidebar.triggered, self.focusSidebar)
+        qconnect(f.actionCardList.triggered, self.onCardList)
         # help
-        f.actionGuide.triggered.connect(self.onHelp)
+        qconnect(f.actionGuide.triggered, self.onHelp)
         # keyboard shortcut for shift+home/end
         self.pgUpCut = QShortcut(QKeySequence("Shift+Home"), self)
         qconnect(self.pgUpCut.activated, self.onFirstCard)
@@ -661,7 +666,7 @@ class Browser(QMainWindow):
 
         # context menu
         self.form.tableView.setContextMenuPolicy(Qt.CustomContextMenu)
-        self.form.tableView.customContextMenuRequested.connect(self.onContextMenu)
+        qconnect(self.form.tableView.customContextMenuRequested, self.onContextMenu)
 
     def onContextMenu(self, _point) -> None:
         m = QMenu()
@@ -693,7 +698,7 @@ class Browser(QMainWindow):
         evt.ignore()
 
     def _closeWindow(self):
-        self._cancelPreviewTimer()
+        self._cleanup_preview()
         self.editor.cleanup()
         saveSplitter(self.form.splitter, "editor3")
         saveGeom(self, "editor")
@@ -745,8 +750,8 @@ class Browser(QMainWindow):
     ######################################################################
 
     def setupSearch(self):
-        self.form.searchButton.clicked.connect(self.onSearchActivated)
-        self.form.searchEdit.lineEdit().returnPressed.connect(self.onSearchActivated)
+        qconnect(self.form.searchButton.clicked, self.onSearchActivated)
+        qconnect(self.form.searchEdit.lineEdit().returnPressed, self.onSearchActivated)
         self.form.searchEdit.setCompleter(None)
         self._searchPrompt = _("<type here to search; hit enter to show current deck>")
         self.form.searchEdit.addItems(
@@ -832,7 +837,10 @@ class Browser(QMainWindow):
         self.form.tableView.setModel(self.model)
         self.form.tableView.selectionModel()
         self.form.tableView.setItemDelegate(StatusDelegate(self, self.model))
-        self.form.tableView.selectionModel().selectionChanged.connect(self.onRowChanged)
+        qconnect(
+            self.form.tableView.selectionModel().selectionChanged, self.onRowChanged
+        )
+        self.form.tableView.setWordWrap(False)
         if not theme_manager.night_mode:
             self.form.tableView.setStyleSheet(
                 "QTableView{ selection-background-color: rgba(150, 150, 150, 50); "
@@ -855,9 +863,11 @@ QTableView {{ gridline-color: {grid} }}
         self.editor.saveNow(lambda: self._onRowChanged(current, previous))
 
     def _onRowChanged(self, current, previous) -> None:
+        if self._closeEventHasCleanedUp:
+            return
         update = self.updateTitle()
         show = self.model.cards and update == 1
-        self.form.splitter.widget(1).setVisible(not not show)
+        self.form.splitter.widget(1).setVisible(bool(show))
         idx = self.form.tableView.selectionModel().currentIndex()
         if idx.isValid():
             self.card = self.model.getCard(idx)
@@ -904,10 +914,10 @@ QTableView {{ gridline-color: {grid} }}
         hh.setSectionsMovable(True)
         self.setColumnSizes()
         hh.setContextMenuPolicy(Qt.CustomContextMenu)
-        hh.customContextMenuRequested.connect(self.onHeaderContext)
+        qconnect(hh.customContextMenuRequested, self.onHeaderContext)
         self.setSortIndicator()
-        hh.sortIndicatorChanged.connect(self.onSortChanged)
-        hh.sectionMoved.connect(self.onColumnMoved)
+        qconnect(hh.sortIndicatorChanged, self.onSortChanged)
+        qconnect(hh.sectionMoved, self.onColumnMoved)
 
     def onSortChanged(self, idx, ord):
         ord = bool(ord)
@@ -915,31 +925,11 @@ QTableView {{ gridline-color: {grid} }}
 
     def _onSortChanged(self, idx, ord):
         type = self.model.activeCols[idx]
-        noSort = ("question", "answer", "template", "deck", "note", "noteTags")
+        noSort = ("question", "answer")
         if type in noSort:
-            if type == "template":
-                showInfo(
-                    _(
-                        """\
-This column can't be sorted on, but you can search for individual card types, \
-such as 'card:1'."""
-                    )
-                )
-            elif type == "deck":
-                showInfo(
-                    _(
-                        """\
-This column can't be sorted on, but you can search for specific decks \
-by clicking on one on the left."""
-                    )
-                )
-            else:
-                showInfo(
-                    _(
-                        "Sorting on this column is not supported. Please "
-                        "choose another."
-                    )
-                )
+            showInfo(
+                _("Sorting on this column is not supported. Please " "choose another.")
+            )
             type = self.col.conf["sortType"]
         if self.col.conf["sortType"] != type:
             self.col.conf["sortType"] = type
@@ -947,10 +937,14 @@ by clicking on one on the left."""
             if type == "noteFld":
                 ord = not ord
             self.col.conf["sortBackwards"] = ord
+            self.col.setMod()
+            self.col.save()
             self.search()
         else:
             if self.col.conf["sortBackwards"] != ord:
                 self.col.conf["sortBackwards"] = ord
+                self.col.setMod()
+                self.col.save()
                 self.model.reverse()
         self.setSortIndicator()
 
@@ -977,7 +971,8 @@ by clicking on one on the left."""
             a = m.addAction(name)
             a.setCheckable(True)
             a.setChecked(type in self.model.activeCols)
-            a.toggled.connect(lambda b, t=type: self.toggleField(t))
+            qconnect(a.toggled, lambda b, t=type: self.toggleField(t))
+        gui_hooks.browser_header_will_show_context_menu(self, m)
         m.exec_(gpos)
 
     def toggleField(self, type):
@@ -1022,8 +1017,8 @@ by clicking on one on the left."""
     class SidebarTreeView(QTreeView):
         def __init__(self):
             super().__init__()
-            self.expanded.connect(self.onExpansion)
-            self.collapsed.connect(self.onCollapse)
+            qconnect(self.expanded, self.onExpansion)
+            qconnect(self.collapsed, self.onCollapse)
 
         def onClickCurrent(self) -> None:
             idx = self.currentIndex()
@@ -1065,13 +1060,13 @@ by clicking on one on the left."""
         self.sidebarTree.setUniformRowHeights(True)
         self.sidebarTree.setHeaderHidden(True)
         self.sidebarTree.setIndentation(15)
-        self.sidebarTree.expanded.connect(self.onSidebarItemExpanded)  # type: ignore
+        qconnect(self.sidebarTree.expanded, self.onSidebarItemExpanded)
         dw.setWidget(self.sidebarTree)
         # match window background color
         bgcolor = QPalette().window().color().name()
         self.sidebarTree.setStyleSheet("QTreeView { background: '%s'; }" % bgcolor)
         self.sidebarDockWidget.setFloating(False)
-        self.sidebarDockWidget.visibilityChanged.connect(self.onSidebarVisChanged)  # type: ignore
+        qconnect(self.sidebarDockWidget.visibilityChanged, self.onSidebarVisChanged)
         self.sidebarDockWidget.setTitleBarWidget(QWidget())
         self.addDockWidget(Qt.LeftDockWidgetArea, dw)
 
@@ -1134,7 +1129,7 @@ by clicking on one on the left."""
 
     def _favTree(self, root) -> None:
         assert self.col
-        saved = self.col.conf.get("savedFilters", {})
+        saved = self.col.get_config("savedFilters", {})
         for name, filt in sorted(saved.items()):
             item = SidebarItem(
                 name,
@@ -1145,7 +1140,7 @@ by clicking on one on the left."""
 
     def _userTagTree(self, root) -> None:
         assert self.col
-        for t in sorted(self.col.tags.all(), key=lambda t: t.lower()):
+        for t in self.col.tags.all():
             item = SidebarItem(
                 t, ":/icons/tag.svg", lambda t=t: self.setFilter("tag", t)  # type: ignore
             )
@@ -1167,15 +1162,15 @@ by clicking on one on the left."""
 
                         continue
                 item = SidebarItem(
-                    g[0],
+                    baseName,
                     ":/icons/deck.svg",
-                    lambda g=g: self.setFilter("deck", head + g[0]),
-                    lambda expanded, g=g: self.mw.col.decks.collapseBrowser(g[1]),
-                    not self.mw.col.decks.get(g[1]).get("browserCollapsed", False),
+                    lambda baseName=baseName: self.setFilter("deck", head + baseName),
+                    lambda expanded, did=did: self.mw.col.decks.collapseBrowser(did),
+                    not self.mw.col.decks.get(did).get("browserCollapsed", False),
                 )
                 root.addChild(item)
-                newhead = head + g[0] + "::"
-                fillGroups(item, g[5], newhead)
+                newhead = head + baseName + "::"
+                fillGroups(item, children, newhead)
 
         fillGroups(root, grps)
 
@@ -1315,7 +1310,7 @@ by clicking on one on the left."""
         def addDecks(parent, decks):
             for head, did, rev, lrn, new, children in decks:
                 name = self.mw.col.decks.get(did)["name"]
-                shortname = name.split("::")[-1]
+                shortname = DeckManager.basename(name)
                 if children:
                     subm = parent.addMenu(shortname)
                     subm.addItem(_("Filter"), self._filterFunc("deck", name))
@@ -1373,7 +1368,7 @@ by clicking on one on the left."""
         ml = MenuList()
         # make sure exists
         if "savedFilters" not in self.col.conf:
-            self.col.conf["savedFilters"] = {}
+            self.col.set_config("savedFilters", {})
 
         ml.addSeparator()
 
@@ -1382,7 +1377,7 @@ by clicking on one on the left."""
         else:
             ml.addItem(_("Save Current Filter..."), self._onSaveFilter)
 
-        saved = self.col.conf["savedFilters"]
+        saved = self.col.get_config("savedFilters")
         if not saved:
             return ml
 
@@ -1392,13 +1387,14 @@ by clicking on one on the left."""
 
         return ml
 
-    def _onSaveFilter(self):
+    def _onSaveFilter(self) -> None:
         name = getOnlyText(_("Please give your filter a name:"))
         if not name:
             return
         filt = self.form.searchEdit.lineEdit().text()
-        self.col.conf["savedFilters"][name] = filt
-        self.col.setMod()
+        conf = self.col.get_config("savedFilters")
+        conf[name] = filt
+        self.col.set_config("savedFilters", conf)
         self.maybeRefreshSidebar()
 
     def _onRemoveFilter(self):
@@ -1412,7 +1408,7 @@ by clicking on one on the left."""
     # returns name if found
     def _currentFilterIsSaved(self):
         filt = self.form.searchEdit.lineEdit().text()
-        for k, v in self.col.conf["savedFilters"].items():
+        for k, v in self.col.get_config("savedFilters").items():
             if filt == v:
                 return k
         return None
@@ -1434,7 +1430,7 @@ by clicking on one on the left."""
         w.stdHtml(info + "<p>" + reps, context=card_info_dialog)
         bb = QDialogButtonBox(QDialogButtonBox.Close)
         l.addWidget(bb)
-        bb.rejected.connect(card_info_dialog.reject)
+        qconnect(bb.rejected, card_info_dialog.reject)
         card_info_dialog.setLayout(l)
         card_info_dialog.setWindowModality(Qt.WindowModal)
         card_info_dialog.resize(500, 400)
@@ -1575,229 +1571,25 @@ where id in %s"""
     # Preview
     ######################################################################
 
-    _previewTimer = None
-    _lastPreviewRender: Union[int, float] = 0
-    _lastPreviewState = None
-    _previewCardChanged = False
-
     def onTogglePreview(self):
-        if self._previewWindow:
-            self._closePreview()
+        if self._previewer:
+            self._previewer.close()
+            self._previewer = None
         else:
-            self._openPreview()
-
-    def _openPreview(self):
-        self._previewState = "question"
-        self._lastPreviewState = None
-        self._previewWindow = QDialog(None, Qt.Window)
-        self._previewWindow.setWindowTitle(_("Preview"))
-
-        self._previewWindow.finished.connect(self._onPreviewFinished)
-        self._previewWindow.silentlyClose = True
-        vbox = QVBoxLayout()
-        vbox.setContentsMargins(0, 0, 0, 0)
-        self._previewWeb = AnkiWebView(title="previewer")
-        vbox.addWidget(self._previewWeb)
-        bbox = QDialogButtonBox()
-
-        self._previewReplay = bbox.addButton(
-            _("Replay Audio"), QDialogButtonBox.ActionRole
-        )
-        self._previewReplay.setAutoDefault(False)
-        self._previewReplay.setShortcut(QKeySequence("R"))
-        self._previewReplay.setToolTip(_("Shortcut key: %s" % "R"))
-
-        self._previewPrev = bbox.addButton("<", QDialogButtonBox.ActionRole)
-        self._previewPrev.setAutoDefault(False)
-        self._previewPrev.setShortcut(QKeySequence("Left"))
-        self._previewPrev.setToolTip(_("Shortcut key: Left arrow"))
-
-        self._previewNext = bbox.addButton(">", QDialogButtonBox.ActionRole)
-        self._previewNext.setAutoDefault(True)
-        self._previewNext.setShortcut(QKeySequence("Right"))
-        self._previewNext.setToolTip(_("Shortcut key: Right arrow or Enter"))
-
-        self._previewPrev.clicked.connect(self._onPreviewPrev)
-        self._previewNext.clicked.connect(self._onPreviewNext)
-        self._previewReplay.clicked.connect(self._onReplayAudio)
-
-        self.previewShowBothSides = QCheckBox(_("Show Both Sides"))
-        self.previewShowBothSides.setShortcut(QKeySequence("B"))
-        self.previewShowBothSides.setToolTip(_("Shortcut key: %s" % "B"))
-        bbox.addButton(self.previewShowBothSides, QDialogButtonBox.ActionRole)
-        self._previewBothSides = self.col.conf.get("previewBothSides", False)
-        self.previewShowBothSides.setChecked(self._previewBothSides)
-        self.previewShowBothSides.toggled.connect(self._onPreviewShowBothSides)
-
-        self._setupPreviewWebview()
-
-        vbox.addWidget(bbox)
-        self._previewWindow.setLayout(vbox)
-        restoreGeom(self._previewWindow, "preview")
-        self._previewWindow.show()
-        self._renderPreview(True)
-
-    def _onPreviewFinished(self, ok):
-        saveGeom(self._previewWindow, "preview")
-        self.mw.progress.timer(100, self._onClosePreview, False)
-        self.form.previewButton.setChecked(False)
-
-    def _onPreviewPrev(self):
-        if self._previewState == "answer" and not self._previewBothSides:
-            self._previewState = "question"
-            self._renderPreview()
-        else:
-            self.editor.saveNow(lambda: self._moveCur(QAbstractItemView.MoveUp))
-
-    def _onPreviewNext(self):
-        if self._previewState == "question":
-            self._previewState = "answer"
-            self._renderPreview()
-        else:
-            self.editor.saveNow(lambda: self._moveCur(QAbstractItemView.MoveDown))
-
-    def _onReplayAudio(self):
-        self.mw.reviewer.replayAudio(self)
-
-    def _updatePreviewButtons(self):
-        if not self._previewWindow:
-            return
-        current = self.currentRow()
-        canBack = current > 0 or (
-            current == 0
-            and self._previewState == "answer"
-            and not self._previewBothSides
-        )
-        self._previewPrev.setEnabled(not not (self.singleCard and canBack))
-        canForward = (
-            self.currentRow() < self.model.rowCount(None) - 1
-            or self._previewState == "question"
-        )
-        self._previewNext.setEnabled(not not (self.singleCard and canForward))
-
-    def _closePreview(self):
-        if self._previewWindow:
-            self._previewWindow.close()
-            self._onClosePreview()
-
-    def _onClosePreview(self):
-        self._previewWindow = self._previewPrev = self._previewNext = None
-
-    def _setupPreviewWebview(self):
-        jsinc = [
-            "jquery.js",
-            "browsersel.js",
-            "mathjax/conf.js",
-            "mathjax/MathJax.js",
-            "reviewer.js",
-        ]
-        web_context = PreviewDialog(dialog=self._previewWindow, browser=self)
-        self._previewWeb.stdHtml(
-            self.mw.reviewer.revHtml(),
-            css=["reviewer.css"],
-            js=jsinc,
-            context=web_context,
-        )
-        self._previewWeb.set_bridge_command(
-            self._on_preview_bridge_cmd, web_context,
-        )
-
-    def _on_preview_bridge_cmd(self, cmd: str) -> Any:
-        if cmd.startswith("play:"):
-            play_clicked_audio(cmd, self.card)
+            self._previewer = PreviewDialog(self, self.mw, self._on_preview_closed)
+            self._previewer.open()
 
     def _renderPreview(self, cardChanged=False):
-        self._cancelPreviewTimer()
-        # Keep track of whether _renderPreview() has ever been called
-        # with cardChanged=True since the last successful render
-        self._previewCardChanged |= cardChanged
-        # avoid rendering in quick succession
-        elapMS = int((time.time() - self._lastPreviewRender) * 1000)
-        delay = 300
-        if elapMS < delay:
-            self._previewTimer = self.mw.progress.timer(
-                delay - elapMS, self._renderScheduledPreview, False
-            )
-        else:
-            self._renderScheduledPreview()
+        if self._previewer:
+            self._previewer.render_card(cardChanged)
 
-    def _cancelPreviewTimer(self):
-        if self._previewTimer:
-            self._previewTimer.stop()
-            self._previewTimer = None
+    def _cleanup_preview(self):
+        if self._previewer:
+            self._previewer.cancel_timer()
+            self._previewer.close()
 
-    def _renderScheduledPreview(self) -> None:
-        self._cancelPreviewTimer()
-        self._lastPreviewRender = time.time()
-
-        if not self._previewWindow:
-            return
-        c = self.card
-        func = "_showQuestion"
-        if not c or not self.singleCard:
-            txt = _("(please select 1 card)")
-            bodyclass = ""
-            self._lastPreviewState = None
-        else:
-            if self._previewBothSides:
-                self._previewState = "answer"
-            elif self._previewCardChanged:
-                self._previewState = "question"
-
-            currentState = self._previewStateAndMod()
-            if currentState == self._lastPreviewState:
-                # nothing has changed, avoid refreshing
-                return
-
-            # need to force reload even if answer
-            txt = c.q(reload=True)
-
-            if self._previewState == "answer":
-                func = "_showAnswer"
-                txt = c.a()
-            txt = re.sub(r"\[\[type:[^]]+\]\]", "", txt)
-
-            bodyclass = theme_manager.body_classes_for_card_ord(c.ord)
-
-            if self.mw.reviewer.autoplay(c):
-                if self._previewBothSides:
-                    # if we're showing both sides at once, remove any audio
-                    # from the answer that's appeared on the question already
-                    question_audio = c.question_av_tags()
-                    only_on_answer_audio = [
-                        x for x in c.answer_av_tags() if x not in question_audio
-                    ]
-                    audio = question_audio + only_on_answer_audio
-                elif self._previewState == "question":
-                    audio = c.question_av_tags()
-                else:
-                    audio = c.answer_av_tags()
-                av_player.play_tags(audio)
-            else:
-                av_player.maybe_interrupt()
-
-                txt = self.mw.prepare_card_text_for_display(txt)
-            txt = gui_hooks.card_will_show(
-                txt, c, "preview" + self._previewState.capitalize()
-            )
-            self._lastPreviewState = self._previewStateAndMod()
-        self._updatePreviewButtons()
-        self._previewWeb.eval("{}({},'{}');".format(func, json.dumps(txt), bodyclass))
-        self._previewCardChanged = False
-
-    def _onPreviewShowBothSides(self, toggle):
-        self._previewBothSides = toggle
-        self.col.conf["previewBothSides"] = toggle
-        self.col.setMod()
-        if self._previewState == "answer" and not toggle:
-            self._previewState = "question"
-        self._renderPreview()
-
-    def _previewStateAndMod(self):
-        c = self.card
-        n = c.note()
-        n.load()
-        return (self._previewState, c.id, n.mod)
+    def _on_preview_closed(self):
+        self._previewer = None
 
     # Card deletion
     ######################################################################
@@ -1933,7 +1725,7 @@ update cards set usn=?, mod=?, did=? where id in """
     ######################################################################
 
     def isSuspended(self):
-        return not not (self.card and self.card.queue == -1)
+        return bool(self.card and self.card.queue == QUEUE_TYPE_SUSPENDED)
 
     def onSuspend(self):
         self.editor.saveNow(self._onSuspend)
@@ -1994,7 +1786,7 @@ update cards set usn=?, mod=?, did=? where id in """
             self.deleteTags(tags="marked", label=False)
 
     def isMarked(self):
-        return not not (self.card and self.card.note().hasTag("Marked"))
+        return bool(self.card and self.card.note().hasTag("Marked"))
 
     # Repositioning
     ######################################################################
@@ -2095,7 +1887,7 @@ update cards set usn=?, mod=?, did=? where id in """
         gui_hooks.editor_did_fire_typing_timer.append(self.refreshCurrentCard)
         gui_hooks.editor_did_load_note.append(self.onLoadNote)
         gui_hooks.editor_did_unfocus_field.append(self.on_unfocus_field)
-        hooks.tag_added.append(self.on_item_added)
+        hooks.tag_list_did_update.append(self.on_tag_list_update)
         hooks.note_type_added.append(self.on_item_added)
         hooks.deck_added.append(self.on_item_added)
 
@@ -2105,7 +1897,7 @@ update cards set usn=?, mod=?, did=? where id in """
         gui_hooks.editor_did_fire_typing_timer.remove(self.refreshCurrentCard)
         gui_hooks.editor_did_load_note.remove(self.onLoadNote)
         gui_hooks.editor_did_unfocus_field.remove(self.on_unfocus_field)
-        hooks.tag_added.remove(self.on_item_added)
+        hooks.tag_list_did_update.remove(self.on_tag_list_update)
         hooks.note_type_added.remove(self.on_item_added)
         hooks.deck_added.remove(self.on_item_added)
 
@@ -2114,6 +1906,9 @@ update cards set usn=?, mod=?, did=? where id in """
 
     # covers the tag, note and deck case
     def on_item_added(self, item: Any) -> None:
+        self.maybeRefreshSidebar()
+
+    def on_tag_list_update(self):
         self.maybeRefreshSidebar()
 
     def onUndoState(self, on):
@@ -2139,7 +1934,7 @@ update cards set usn=?, mod=?, did=? where id in """
         frm.setupUi(d)
         d.setWindowModality(Qt.WindowModal)
         frm.field.addItems([_("All Fields")] + fields)
-        frm.buttonBox.helpRequested.connect(self.onFindReplaceHelp)
+        qconnect(frm.buttonBox.helpRequested, self.onFindReplaceHelp)
         restoreGeom(d, "findreplace")
         r = d.exec_()
         saveGeom(d, "findreplace")
@@ -2207,7 +2002,7 @@ update cards set usn=?, mod=?, did=? where id in """
         def onFin(code):
             saveGeom(d, "findDupes")
 
-        d.finished.connect(onFin)
+        qconnect(d.finished, onFin)
 
         def onClick():
             field = fields[frm.fields.currentIndex()]
@@ -2216,7 +2011,7 @@ update cards set usn=?, mod=?, did=? where id in """
             )
 
         search = frm.buttonBox.addButton(_("Search"), QDialogButtonBox.ActionRole)
-        search.clicked.connect(onClick)
+        qconnect(search.clicked, onClick)
         d.show()
 
     def duplicatesReport(self, web, fname, search, frm, web_context):
@@ -2226,7 +2021,7 @@ update cards set usn=?, mod=?, did=? where id in """
             self._dupesButton = b = frm.buttonBox.addButton(
                 _("Tag Duplicates"), QDialogButtonBox.ActionRole
             )
-            b.clicked.connect(lambda: self._onTagDupes(res))
+            qconnect(b.clicked, lambda: self._onTagDupes(res))
         t = ""
         groups = len(res)
         notes = sum(len(r[1]) for r in res)
@@ -2386,7 +2181,7 @@ class ChangeModel(QDialog):
             self.browser.mw, self.form.modelChooserWidget, label=False
         )
         self.modelChooser.models.setFocus()
-        self.form.buttonBox.helpRequested.connect(self.onHelp)
+        qconnect(self.form.buttonBox.helpRequested, self.onHelp)
         self.modelChanged(self.browser.mw.col.models.current())
         self.pauseUpdate = False
 
@@ -2422,8 +2217,9 @@ class ChangeModel(QDialog):
             idx = min(i, len(targets) - 1)
             cb.setCurrentIndex(idx)
             indices[cb] = idx
-            cb.currentIndexChanged.connect(
-                lambda i, cb=cb, key=key: self.onComboChanged(i, cb, key)
+            qconnect(
+                cb.currentIndexChanged,
+                lambda i, cb=cb, key=key: self.onComboChanged(i, cb, key),
             )
             combos.append(cb)
             l.addWidget(cb, i, 1)

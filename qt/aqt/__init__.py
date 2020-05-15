@@ -17,6 +17,7 @@ import anki.lang
 import aqt.buildinfo
 from anki import version as _version
 from anki.consts import HELP_SITE
+from anki.rsbackend import RustBackend
 from anki.utils import checksum, isLin, isMac
 from aqt.qt import *
 from aqt.utils import locale_dir
@@ -34,6 +35,7 @@ appHelpSite = HELP_SITE
 from aqt.main import AnkiQt  # isort:skip
 from aqt.profiles import ProfileManager  # isort:skip
 
+profiler = None
 mw: Optional[AnkiQt] = None  # set on init
 
 moduleDir = os.path.split(os.path.dirname(os.path.abspath(__file__)))[0]
@@ -162,15 +164,15 @@ dialogs = DialogManager()
 # Qt requires its translator to be installed before any GUI widgets are
 # loaded, and we need the Qt language to match the gettext language or
 # translated shortcuts will not work.
-#
-# The Qt translator needs to be retained to work.
 
+# A reference to the Qt translator needs to be held to prevent it from
+# being immediately deallocated.
 _qtrans: Optional[QTranslator] = None
 
 
-def setupLang(
+def setupLangAndBackend(
     pm: ProfileManager, app: QApplication, force: Optional[str] = None
-) -> None:
+) -> RustBackend:
     global _qtrans
     try:
         locale.setlocale(locale.LC_ALL, "")
@@ -218,6 +220,8 @@ def setupLang(
     if _qtrans.load("qtbase_" + qt_lang, qt_dir):
         app.installTranslator(_qtrans)
 
+    return anki.lang.current_i18n
+
 
 # App initialisation
 ##########################################################################
@@ -252,7 +256,7 @@ class AnkiApp(QApplication):
             # previous instance died
             QLocalServer.removeServer(self.KEY)
             self._srv = QLocalServer(self)
-            self._srv.newConnection.connect(self.onRecv)
+            qconnect(self._srv.newConnection, self.onRecv)
             self._srv.listen(self.KEY)
             return False
 
@@ -344,6 +348,21 @@ def setupGL(pm):
         os.environ["QT_OPENGL"] = mode
 
 
+PROFILE_CODE = os.environ.get("ANKI_PROFILE_CODE")
+
+
+def print_profile_results():
+    import io
+    import pstats
+
+    profiler.disable()
+    outputstream = io.StringIO()
+    profiler_status = pstats.Stats(profiler, stream=outputstream)
+    profiler_status.sort_stats("time")
+    profiler_status.print_stats()
+    sys.stderr.write(f"\n{outputstream.getvalue()}\n")
+
+
 def run():
     try:
         _run()
@@ -367,12 +386,19 @@ def _run(argv=None, exec=True):
     If no 'argv' is supplied then 'sys.argv' will be used.
     """
     global mw
+    global profiler
 
     if argv is None:
         argv = sys.argv
 
     # parse args
     opts, args = parseArgs(argv)
+
+    if PROFILE_CODE:
+        import cProfile
+
+        profiler = cProfile.Profile()
+        profiler.enable()
 
     # profile manager
     pm = None
@@ -465,8 +491,8 @@ environment points to a valid, writable folder.""",
     if opts.profile:
         pm.openProfile(opts.profile)
 
-    # i18n
-    setupLang(pm, app, opts.lang)
+    # i18n & backend
+    backend = setupLangAndBackend(pm, app, opts.lang)
 
     if isLin and pm.glMode() == "auto":
         from aqt.utils import gfxDriverIsBroken
@@ -483,8 +509,11 @@ environment points to a valid, writable folder.""",
     # load the main window
     import aqt.main
 
-    mw = aqt.main.AnkiQt(app, pm, opts, args)
+    mw = aqt.main.AnkiQt(app, pm, backend, opts, args)
     if exec:
         app.exec()
     else:
         return app
+
+    if PROFILE_CODE:
+        print_profile_results()

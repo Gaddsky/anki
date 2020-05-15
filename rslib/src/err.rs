@@ -1,7 +1,7 @@
 // Copyright: Ankitects Pty Ltd and contributors
 // License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
 
-use crate::i18n::{tr_strs, FString, I18n};
+use crate::i18n::{tr_strs, I18n, TR};
 pub use failure::{Error, Fail};
 use reqwest::StatusCode;
 use std::io;
@@ -20,7 +20,7 @@ pub enum AnkiError {
     IOError { info: String },
 
     #[fail(display = "DB error: {}", info)]
-    DBError { info: String },
+    DBError { info: String, kind: DBErrorKind },
 
     #[fail(display = "Network error: {:?} {}", kind, info)]
     NetworkError {
@@ -31,8 +31,20 @@ pub enum AnkiError {
     #[fail(display = "Sync error: {:?}, {}", kind, info)]
     SyncError { info: String, kind: SyncErrorKind },
 
+    #[fail(display = "JSON encode/decode error: {}", info)]
+    JSONError { info: String },
+
     #[fail(display = "The user interrupted the operation.")]
     Interrupted,
+
+    #[fail(display = "Operation requires an open collection.")]
+    CollectionNotOpen,
+
+    #[fail(display = "Close the existing collection first.")]
+    CollectionAlreadyOpen,
+
+    #[fail(display = "Operation modifies schema, but schema not marked modified.")]
+    SchemaChange,
 }
 
 // error helpers
@@ -60,21 +72,21 @@ impl AnkiError {
             AnkiError::SyncError { info, kind } => match kind {
                 SyncErrorKind::ServerMessage => info.into(),
                 SyncErrorKind::Other => info.into(),
-                SyncErrorKind::Conflict => i18n.tr(FString::SyncConflict),
-                SyncErrorKind::ServerError => i18n.tr(FString::SyncServerError),
-                SyncErrorKind::ClientTooOld => i18n.tr(FString::SyncClientTooOld),
-                SyncErrorKind::AuthFailed => i18n.tr(FString::SyncWrongPass),
-                SyncErrorKind::ResyncRequired => i18n.tr(FString::SyncResyncRequired),
+                SyncErrorKind::Conflict => i18n.tr(TR::SyncConflict),
+                SyncErrorKind::ServerError => i18n.tr(TR::SyncServerError),
+                SyncErrorKind::ClientTooOld => i18n.tr(TR::SyncClientTooOld),
+                SyncErrorKind::AuthFailed => i18n.tr(TR::SyncWrongPass),
+                SyncErrorKind::ResyncRequired => i18n.tr(TR::SyncResyncRequired),
             }
             .into(),
             AnkiError::NetworkError { kind, info } => {
                 let summary = match kind {
-                    NetworkErrorKind::Offline => i18n.tr(FString::NetworkOffline),
-                    NetworkErrorKind::Timeout => i18n.tr(FString::NetworkTimeout),
-                    NetworkErrorKind::ProxyAuth => i18n.tr(FString::NetworkProxyAuth),
-                    NetworkErrorKind::Other => i18n.tr(FString::NetworkOther),
+                    NetworkErrorKind::Offline => i18n.tr(TR::NetworkOffline),
+                    NetworkErrorKind::Timeout => i18n.tr(TR::NetworkTimeout),
+                    NetworkErrorKind::ProxyAuth => i18n.tr(TR::NetworkProxyAuth),
+                    NetworkErrorKind::Other => i18n.tr(TR::NetworkOther),
                 };
-                let details = i18n.trn(FString::NetworkDetails, tr_strs!["details"=>info]);
+                let details = i18n.trn(TR::NetworkDetails, tr_strs!["details"=>info]);
                 format!("{}\n\n{}", summary, details)
             }
             AnkiError::TemplateError { info } => {
@@ -112,6 +124,7 @@ impl From<rusqlite::Error> for AnkiError {
     fn from(err: rusqlite::Error) -> Self {
         AnkiError::DBError {
             info: format!("{:?}", err),
+            kind: DBErrorKind::Other,
         }
     }
 }
@@ -120,6 +133,7 @@ impl From<rusqlite::types::FromSqlError> for AnkiError {
     fn from(err: rusqlite::types::FromSqlError) -> Self {
         AnkiError::DBError {
             info: format!("{:?}", err),
+            kind: DBErrorKind::Other,
         }
     }
 }
@@ -212,6 +226,16 @@ impl From<zip::result::ZipError> for AnkiError {
 
 impl From<serde_json::Error> for AnkiError {
     fn from(err: serde_json::Error) -> Self {
-        AnkiError::sync_misc(err.to_string())
+        AnkiError::JSONError {
+            info: err.to_string(),
+        }
     }
+}
+
+#[derive(Debug, PartialEq)]
+pub enum DBErrorKind {
+    FileTooNew,
+    FileTooOld,
+    MissingEntity,
+    Other,
 }

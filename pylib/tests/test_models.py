@@ -318,7 +318,7 @@ def test_modelChange():
     try:
         c1.load()
         assert 0
-    except TypeError:
+    except AssertionError:
         pass
     # but we have two cards, as a new one was generated
     assert len(f.cards()) == 2
@@ -411,7 +411,7 @@ def test_req():
     reqSize(opt)
     r = opt["req"][0]
     assert r[1] in ("any", "all")
-    assert r[2] == [0]
+    assert r[2] == [0, 1]
 
 
 # def test_updatereqs_performance():

@@ -1,9 +1,11 @@
 [package]
 name = "anki"
-version = "2.1.22" # automatically updated
+version = "2.1.27"  # automatically updated
 edition = "2018"
 authors = ["Ankitects Pty Ltd and contributors"]
 license = "AGPL-3.0-or-later"
+description = "Anki's Rust library code"
+readme = "README.md"
 
 [dependencies]
 nom = "5.0.1"
@@ -36,18 +38,26 @@ slog = { version = "2.5.2", features = ["max_level_trace", "release_max_level_de
 slog-term = "2.5.0"
 slog-async = "2.4.0"
 slog-envlogger = "2.2.0"
+serde_repr = "0.1.5"
+num_enum = "0.4.2"
+# pinned as any changes could invalidate sqlite indexes
+unicase = "=2.6.0"
+futures = "0.3.4"
 
-[target.'cfg(target_vendor="apple")'.dependencies]
-rusqlite = { version = "0.21.0", features = ["trace"] }
+# pinned until rusqlite 0.22 comes out
+[target.'cfg(target_vendor="apple")'.dependencies.rusqlite]
+version = "0.22"
+features = ["trace", "functions", "collation"]
 
-[target.'cfg(not(target_vendor="apple"))'.dependencies]
-rusqlite = { version = "0.21.0", features = ["trace", "bundled"] }
+[target.'cfg(not(target_vendor="apple"))'.dependencies.rusqlite]
+version = "0.22"
+features = ["trace", "functions", "collation", "bundled"]
 
 [target.'cfg(linux)'.dependencies]
-reqwest = { version = "0.10.1", features = ["json", "native-tls-vendored"] }
+reqwest = { version = "0.10.1", features = ["json", "socks", "native-tls-vendored"] }
 
 [target.'cfg(not(linux))'.dependencies]
-reqwest = { version = "0.10.1", features = ["json"] }
+reqwest = { version = "0.10.1", features = ["json", "socks"] }
 
 [build-dependencies]
 prost-build = "0.6.1"

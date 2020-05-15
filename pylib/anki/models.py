@@ -4,7 +4,6 @@
 from __future__ import annotations
 
 import copy
-import json
 import re
 import time
 from typing import Any, Callable, Dict, List, Optional, Tuple, Union
@@ -95,11 +94,6 @@ class ModelManager:
         self.models = {}
         self.changed = False
 
-    def load(self, json_: str) -> None:
-        "Load registry from JSON."
-        self.changed = False
-        self.models = json.loads(json_)
-
     def save(
         self,
         m: Optional[NoteType] = None,
@@ -121,7 +115,7 @@ class ModelManager:
         "Flush the registry if any models were changed."
         if self.changed:
             self.ensureNotEmpty()
-            self.col.db.execute("update col set models = ?", json.dumps(self.models))
+            self.col.backend.set_all_notetypes(self.models)
             self.changed = False
 
     def ensureNotEmpty(self) -> Optional[bool]:
@@ -504,17 +498,9 @@ select id from notes where mid = ?)"""
             for c in range(nfields):
                 flds.append(newflds.get(c, ""))
             flds = joinFields(flds)
-            d.append(
-                dict(
-                    nid=nid,
-                    flds=flds,
-                    mid=newModel["id"],
-                    m=intTime(),
-                    u=self.col.usn(),
-                )
-            )
+            d.append((flds, newModel["id"], intTime(), self.col.usn(), nid,))
         self.col.db.executemany(
-            "update notes set flds=:flds,mid=:mid,mod=:m,usn=:u where id = :nid", d
+            "update notes set flds=?,mid=?,mod=?,usn=? where id = ?", d
         )
         self.col.updateFieldCache(nids)
 
@@ -543,12 +529,10 @@ select id from notes where mid = ?)"""
                 # mapping from a regular note, so the map should be valid
                 new = map[ord]
             if new is not None:
-                d.append(dict(cid=cid, new=new, u=self.col.usn(), m=intTime()))
+                d.append((new, self.col.usn(), intTime(), cid))
             else:
                 deleted.append(cid)
-        self.col.db.executemany(
-            "update cards set ord=:new,usn=:u,mod=:m where id=:cid", d
-        )
+        self.col.db.executemany("update cards set ord=?,usn=?,mod=? where id=?", d)
         self.col.remCards(deleted)
 
     # Schema hash

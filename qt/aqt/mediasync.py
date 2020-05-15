@@ -11,11 +11,18 @@ from typing import List, Union
 import aqt
 from anki import hooks
 from anki.consts import SYNC_BASE
-from anki.rsbackend import TR, Interrupted, MediaSyncProgress, Progress, ProgressKind
+from anki.rsbackend import (
+    TR,
+    Interrupted,
+    MediaSyncProgress,
+    NetworkError,
+    Progress,
+    ProgressKind,
+)
 from anki.types import assert_impossible
 from anki.utils import intTime
 from aqt import gui_hooks
-from aqt.qt import QDialog, QDialogButtonBox, QPushButton
+from aqt.qt import QDialog, QDialogButtonBox, QPushButton, qconnect
 from aqt.utils import showWarning, tr
 
 LogEntry = Union[MediaSyncProgress, str]
@@ -100,6 +107,10 @@ class MediaSyncer:
         if isinstance(exc, Interrupted):
             self._log_and_notify(tr(TR.SYNC_MEDIA_ABORTED))
             return
+        elif isinstance(exc, NetworkError):
+            # avoid popups for network errors
+            self._log_and_notify(str(exc))
+            return
 
         self._log_and_notify(tr(TR.SYNC_MEDIA_FAILED))
         showWarning(str(exc))
@@ -112,6 +123,7 @@ class MediaSyncer:
             return
         self._log_and_notify(tr(TR.SYNC_MEDIA_ABORTING))
         self._want_stop = True
+        self.mw.col.backend.abort_media_sync()
 
     def is_syncing(self) -> bool:
         return self._syncing
@@ -155,7 +167,7 @@ class MediaSyncDialog(QDialog):
         self.form.setupUi(self)
         self.setWindowTitle(tr(TR.SYNC_MEDIA_LOG_TITLE))
         self.abort_button = QPushButton(tr(TR.SYNC_ABORT_BUTTON))
-        self.abort_button.clicked.connect(self._on_abort)  # type: ignore
+        qconnect(self.abort_button.clicked, self._on_abort)
         self.abort_button.setAutoDefault(False)
         self.form.buttonBox.addButton(self.abort_button, QDialogButtonBox.ActionRole)
         self.abort_button.setHidden(not self._syncer.is_syncing())

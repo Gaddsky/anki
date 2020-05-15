@@ -249,7 +249,7 @@ class AnkiExporter(Exporter):
         # copy used deck confs
         for dc in self.src.decks.allConf():
             if dc["id"] in dconfs:
-                self.dst.decks.updateConf(dc)
+                self.dst.decks.update_config(dc)
         # find used media
         media = {}
         self.mediaDir = self.src.media.dir()
@@ -280,7 +280,7 @@ class AnkiExporter(Exporter):
         self.count = self.dst.cardCount()
         self.dst.setMod()
         self.postExport()
-        self.dst.close()
+        self.dst.close(downgrade=True)
 
     def postExport(self) -> None:
         # overwrite to apply customizations to the deck before it's closed,
@@ -376,7 +376,7 @@ class AnkiPackageExporter(AnkiExporter):
         n[_("Front")] = "This file requires a newer version of Anki."
         c.addNote(n)
         c.save()
-        c.close()
+        c.close(downgrade=True)
 
         zip.write(path, "collection.anki2")
         os.unlink(path)
@@ -397,20 +397,20 @@ class AnkiCollectionPackageExporter(AnkiPackageExporter):
         AnkiPackageExporter.__init__(self, col)
 
     def doExport(self, z, path):
-        # close our deck & write it into the zip file, and reopen
+        "Export collection. Caller must re-open afterwards."
+        # close our deck & write it into the zip file
         self.count = self.col.cardCount()
         v2 = self.col.schedVer() != 1
-        self.col.close()
+        mdir = self.col.media.dir()
+        self.col.close(downgrade=True)
         if not v2:
             z.write(self.col.path, "collection.anki2")
         else:
             self._addDummyCollection(z)
             z.write(self.col.path, "collection.anki21")
-        self.col.reopen()
         # copy all media
         if not self.includeMedia:
             return {}
-        mdir = self.col.media.dir()
         return self._exportMedia(z, os.listdir(mdir), mdir)
 
 

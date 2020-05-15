@@ -30,6 +30,16 @@ class ReviewerBottomBar:
         self.reviewer = reviewer
 
 
+def replay_audio(card: Card, question_side: bool) -> None:
+    if question_side:
+        av_player.play_tags(card.question_av_tags())
+    else:
+        tags = card.answer_av_tags()
+        if card.replay_question_audio_on_answer_side():
+            tags = card.question_av_tags() + tags
+        av_player.play_tags(tags)
+
+
 class Reviewer:
     "Manage reviews.  Maintains a separate state."
 
@@ -110,20 +120,11 @@ class Reviewer:
     # Audio
     ##########################################################################
 
-    def replayAudio(self, previewer=None):
-        if previewer:
-            state = previewer._previewState
-            c = previewer.card
-        else:
-            state = self.state
-            c = self.card
-        if state == "question":
-            av_player.play_tags(c.question_av_tags())
-        elif state == "answer":
-            tags = c.answer_av_tags()
-            if self._replayq(c, previewer):
-                tags = c.question_av_tags() + tags
-            av_player.play_tags(tags)
+    def replayAudio(self) -> None:
+        if self.state == "question":
+            replay_audio(self.card, True)
+        elif self.state == "answer":
+            replay_audio(self.card, False)
 
     # Initializing the webview
     ##########################################################################
@@ -188,10 +189,10 @@ The front of this card is empty. Please run Tools>Empty Cards."""
             q = c.q()
 
         # play audio?
-        if self.autoplay(c):
+        if c.autoplay():
             av_player.play_tags(c.question_av_tags())
         else:
-            av_player.maybe_interrupt()
+            av_player.clear_queue_and_maybe_interrupt()
 
         # render & update bottom
         q = self._mungeQA(q)
@@ -210,11 +211,8 @@ The front of this card is empty. Please run Tools>Empty Cards."""
         gui_hooks.reviewer_did_show_question(c)
 
     def autoplay(self, card: Card) -> bool:
-        return self.mw.col.decks.confForDid(card.odid or card.did)["autoplay"]
-
-    def _replayq(self, card, previewer=None):
-        s = previewer if previewer else self
-        return s.mw.col.decks.confForDid(s.card.odid or s.card.did).get("replayq", True)
+        print("use card.autoplay() instead of reviewer.autoplay(card)")
+        return card.autoplay()
 
     def _drawFlag(self) -> None:
         self.web.eval("_drawFlag(%s);" % self.card.userFlag())
@@ -233,10 +231,10 @@ The front of this card is empty. Please run Tools>Empty Cards."""
         c = self.card
         a = c.a()
         # play audio?
-        if self.autoplay(c):
+        if c.autoplay():
             av_player.play_tags(c.answer_av_tags())
         else:
-            av_player.maybe_interrupt()
+            av_player.clear_queue_and_maybe_interrupt()
 
         a = self._mungeQA(a)
         a = gui_hooks.card_will_show(a, c, "reviewAnswer")
@@ -517,7 +515,7 @@ Please run Tools>Empty Cards"""
                     res += good(txt)
                 else:
                     res += bad(txt)
-            res += "<br>&darr;<br>"
+            res += "<br><span id=typearrow>&darr;</span><br>"
             for ok, txt in correctElems:
                 txt = self._noLoneMarks(txt)
                 if ok:
@@ -759,7 +757,7 @@ time = %(time)d;
             if opts.get("checked"):
                 a.setCheckable(True)
                 a.setChecked(True)
-            a.triggered.connect(func)
+            qconnect(a.triggered, func)
 
     def onOptions(self) -> None:
         self.mw.onDeckConf(self.mw.col.decks.get(self.card.odid or self.card.did))

@@ -19,10 +19,11 @@ To start, make sure you have the following installed:
  - protoc v3 (https://github.com/protocolbuffers/protobuf/releases)
  - rustup (https://rustup.rs/)
  - gettext
- - rename
  - rsync
  - perl
- - ripgrep (cargo install rigrep)
+ - ripgrep (cargo install ripgrep)
+ - git
+ - curl
 
 The build scripts assume a UNIX-like environment, so on Windows you will
 need to use WSL or Cygwin to use them.
@@ -46,7 +47,6 @@ Subcomponents
   is only a tiny subsection at the moment.
 - proto contains the interface used to communicate between different
   languages.
-- tslib and react are just an experiment at the moment.
 
 Makefile
 --------------
@@ -61,6 +61,10 @@ folder.
 
 Use 'make clean' to remove some generated files.
 
+To see all commands run by make or any shell script, export the environment
+variable SHELLFLAGS with '-x' to tell shell to print all commands run by it.
+For example, 'export SHELLFLAGS=-x' on Linux or 'set SHELLFLAGS=-x' on Windows.
+
 PyQt
 -----
 
@@ -69,12 +73,33 @@ system install, you will need to set up the pyenv folder yourself, making sure
 you have PyQt5, the WebEngine module and development tools (eg pyqt5-dev-tools)
 installed as well. You'll need to create the venv with --system-site-packages.
 
+Debian/Ubuntu users
+-------------------
+
+Install Python 3.7 (not necessary for Ubuntu 19.04 and later):
+```
+sudo apt install python3.7 python3.7-dev
+sudo update-alternatives --install /usr/bin/python3 python3 /usr/bin/python3.6 1
+sudo update-alternatives --install /usr/bin/python3 python3 /usr/bin/python3.7 2
+```
+
+Install other dependencies:
+```
+sudo apt install portaudio19-dev mpv lame npm rsync gcc gettext git curl
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+source $HOME/.cargo/env
+wget https://github.com/protocolbuffers/protobuf/releases/download/v3.11.4/protoc-3.11.4-linux-x86_64.zip
+sudo unzip protoc-3.11.4-linux-x86_64.zip -d /usr/local/ -x readme.txt
+rustup update
+cargo install ripgrep
+```
+
 Mac users
 ----------
 
 You can use homebrew to install some dependencies:
 
-$ brew install python mpv lame portaudio protobuf npm rustup-init gettext rename
+$ brew install python mpv lame portaudio protobuf npm rustup-init gettext rename ripgrep
 
 $ brew link gettext --force
 
@@ -83,8 +108,8 @@ Windows users (using Visual Studio)
 
 User-contributed instructions for building using Cygwin:
 
-1. Download and install Cygwin and put its `/bin/` directory on your system path.
-1. Install the Cygwin Packages: `apt-cyg install rsync make`
+1. Download and install Cygwin and put its `/bin/` directory on your system path (This PC > Properties > Advancded system settings > Environment Variables > double-click Path > New).
+1. Install the Cygwin Packages: `apt-cyg install rsync make` OR select rsync package during Cygwin installation
     1. Download `gettext` 0.20.1 or superior and put its `bin` directory on your system path.
         1. https://mlocati.github.io/articles/gettext-iconv-windows.html
 1. Download and install Python for Windows (not from Cygwin) and put `python.exe` (not `python3.exe`) on your system path.
@@ -92,13 +117,22 @@ User-contributed instructions for building using Cygwin:
 1. Download and install rust (compiler), npm, git and put them your system path.
 1. Download and install the pyaudio wheel from: https://www.lfd.uci.edu/~gohlke/pythonlibs/#pyaudio
     1. After download the file for your Python version, you need to define the following environment
-        variable before running anki:
+        variable before running Anki:
         `set "ANKI_EXTRA_PIP=python -m pip install full/path/to/PyAudio‑0.2.11‑cp38‑cp38‑win_amd64.whl"`
     1. If there is not an wheel available for your Python version, you can built it from the source
         following the installation instructions on: https://github.com/evandroforks/pyaudio
         After building and installing portaudio, you need to define the following environment
-        variable before running anki:
+        variable before running Anki:
         `set "ANKI_EXTRA_PIP=python -m pip install git+https://github.com/evandroforks/pyaudio"`
-1. Open a `cmd.exe` (command prompt) on the anki repository and run the command `sh run`
+1. Open a `cmd.exe` (command prompt) on the Anki repository and run the command `sh run`
     1. Do not use `bash run` because it my call for Windows Subsystem for Linux
     1. Do not use any Cygwin terminal as `mintty.exe` because the `rust lang` compiler does not work with them
+
+Enviromental Variables
+-----------------------
+
+If ANKIDEV is set before starting Anki, some extra log messages will be printed on stdout,
+and automatic backups will be disabled - so please don't use this except on a test profile.
+
+If LOGTERM is set before starting Anki, warnings and error messages that are normally placed
+in the collection2.log file will also be printed on stdout.

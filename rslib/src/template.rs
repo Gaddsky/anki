@@ -2,7 +2,7 @@
 // License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
 
 use crate::err::{AnkiError, Result, TemplateError};
-use crate::i18n::{tr_strs, FString, I18n};
+use crate::i18n::{tr_strs, I18n, TR};
 use crate::template_filters::apply_filters;
 use lazy_static::lazy_static;
 use nom::branch::alt;
@@ -196,12 +196,12 @@ fn parse_inner<'a, I: Iterator<Item = TemplateResult<Token<'a>>>>(
 
 fn template_error_to_anki_error(err: TemplateError, q_side: bool, i18n: &I18n) -> AnkiError {
     let header = i18n.tr(if q_side {
-        FString::CardTemplateRenderingFrontSideProblem
+        TR::CardTemplateRenderingFrontSideProblem
     } else {
-        FString::CardTemplateRenderingBackSideProblem
+        TR::CardTemplateRenderingBackSideProblem
     });
     let details = localized_template_error(i18n, err);
-    let more_info = i18n.tr(FString::CardTemplateRenderingMoreInfo);
+    let more_info = i18n.tr(TR::CardTemplateRenderingMoreInfo);
     let info = format!(
         "{}<br>{}<br><a href='{}'>{}</a>",
         header, details, TEMPLATE_ERROR_LINK, more_info
@@ -213,11 +213,11 @@ fn template_error_to_anki_error(err: TemplateError, q_side: bool, i18n: &I18n) -
 fn localized_template_error(i18n: &I18n, err: TemplateError) -> String {
     match err {
         TemplateError::NoClosingBrackets(tag) => i18n.trn(
-            FString::CardTemplateRenderingNoClosingBrackets,
+            TR::CardTemplateRenderingNoClosingBrackets,
             tr_strs!("tag"=>tag, "missing"=>"}}"),
         ),
         TemplateError::ConditionalNotClosed(tag) => i18n.trn(
-            FString::CardTemplateRenderingConditionalNotClosed,
+            TR::CardTemplateRenderingConditionalNotClosed,
             tr_strs!("missing"=>format!("{{{{/{}}}}}", tag)),
         ),
         TemplateError::ConditionalNotOpen {
@@ -226,14 +226,14 @@ fn localized_template_error(i18n: &I18n, err: TemplateError) -> String {
         } => {
             if let Some(open) = currently_open {
                 i18n.trn(
-                    FString::CardTemplateRenderingWrongConditionalClosed,
+                    TR::CardTemplateRenderingWrongConditionalClosed,
                     tr_strs!(
                 "found"=>format!("{{{{/{}}}}}", closed),
                 "expected"=>format!("{{{{/{}}}}}", open)),
                 )
             } else {
                 i18n.trn(
-                    FString::CardTemplateRenderingConditionalNotOpen,
+                    TR::CardTemplateRenderingConditionalNotOpen,
                     tr_strs!(
                     "found"=>format!("{{{{/{}}}}}", closed),
                     "missing1"=>format!("{{{{#{}}}}}", closed),
@@ -243,7 +243,7 @@ fn localized_template_error(i18n: &I18n, err: TemplateError) -> String {
             }
         }
         TemplateError::FieldNotFound { field, filters } => i18n.trn(
-            FString::CardTemplateRenderingNoSuchField,
+            TR::CardTemplateRenderingNoSuchField,
             tr_strs!(
             "found"=>format!("{{{{{}{}}}}}", filters, field),
             "field"=>field),
@@ -285,12 +285,7 @@ fn template_is_empty<'a>(nonempty_fields: &HashSet<&str>, nodes: &[ParsedNode<'a
         match node {
             // ignore normal text
             Text(_) => (),
-            Replacement { key, filters } => {
-                // Anki doesn't consider a type: reference as a required field
-                if filters.contains(&"type") {
-                    continue;
-                }
-
+            Replacement { key, .. } => {
                 if nonempty_fields.contains(*key) {
                     // a single replacement is enough
                     return false;
@@ -509,9 +504,9 @@ pub fn render_card(
     if !qtmpl.renders_with_fields(context.nonempty_fields) {
         let info = format!(
             "{}<br><a href='{}'>{}</a>",
-            i18n.tr(FString::CardTemplateRenderingEmptyFront),
+            i18n.tr(TR::CardTemplateRenderingEmptyFront),
             TEMPLATE_BLANK_LINK,
-            i18n.tr(FString::CardTemplateRenderingMoreInfo)
+            i18n.tr(TR::CardTemplateRenderingMoreInfo)
         );
         return Err(AnkiError::TemplateError { info });
     };
@@ -657,7 +652,7 @@ mod test {
         let fields = HashSet::from_iter(vec!["1", "3"].into_iter());
         let mut tmpl = PT::from_text("{{2}}{{1}}").unwrap();
         assert_eq!(tmpl.renders_with_fields(&fields), true);
-        tmpl = PT::from_text("{{2}}{{type:cloze:1}}").unwrap();
+        tmpl = PT::from_text("{{2}}").unwrap();
         assert_eq!(tmpl.renders_with_fields(&fields), false);
         tmpl = PT::from_text("{{2}}{{4}}").unwrap();
         assert_eq!(tmpl.renders_with_fields(&fields), false);
@@ -698,12 +693,6 @@ mod test {
         assert_eq!(
             tmpl.requirements(&field_map),
             FieldRequirements::All(HashSet::from_iter(vec![0, 1].into_iter()))
-        );
-
-        tmpl = PT::from_text("{{a}}{{type:b}}").unwrap();
-        assert_eq!(
-            tmpl.requirements(&field_map),
-            FieldRequirements::Any(HashSet::from_iter(vec![0].into_iter()))
         );
 
         tmpl = PT::from_text(

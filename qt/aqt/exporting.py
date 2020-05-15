@@ -6,11 +6,12 @@ from __future__ import annotations
 import os
 import re
 import time
+from concurrent.futures import Future
 from typing import List, Optional
 
 import aqt
 from anki import hooks
-from anki.exporting import exporters
+from anki.exporting import Exporter, exporters
 from anki.lang import _, ngettext
 from aqt.qt import *
 from aqt.utils import checkInvalidFilename, getSaveFile, showWarning, tooltip
@@ -25,10 +26,10 @@ class ExportDialog(QDialog):
     ):
         QDialog.__init__(self, mw, Qt.Window)
         self.mw = mw
-        self.col = mw.col
+        self.col = mw.col.weakref()
         self.frm = aqt.forms.exporting.Ui_ExportDialog()
         self.frm.setupUi(self)
-        self.exporter = None
+        self.exporter: Optional[Exporter] = None
         self.cids = cids
         self.setup(did)
         self.exec_()
@@ -44,7 +45,7 @@ class ExportDialog(QDialog):
                     break
         self.frm.format.insertItems(0, [e[0] for e in self.exporters])
         self.frm.format.setCurrentIndex(idx)
-        self.frm.format.activated.connect(self.exporterChanged)
+        qconnect(self.frm.format.activated, self.exporterChanged)
         self.exporterChanged(idx)
         # deck list
         if self.cids is None:
@@ -131,7 +132,7 @@ class ExportDialog(QDialog):
             break
         self.hide()
         if file:
-            self.mw.progress.start(immediate=True)
+            # check we can write to file
             try:
                 f = open(file, "wb")
                 f.close()
@@ -139,38 +140,51 @@ class ExportDialog(QDialog):
                 showWarning(_("Couldn't save file: %s") % str(e))
             else:
                 os.unlink(file)
-                exportedMedia = lambda cnt: self.mw.progress.update(
-                    label=ngettext(
-                        "Exported %d media file", "Exported %d media files", cnt
+
+            # progress handler
+            def exported_media(cnt):
+                self.mw.taskman.run_on_main(
+                    lambda: self.mw.progress.update(
+                        label=ngettext(
+                            "Exported %d media file", "Exported %d media files", cnt
+                        )
+                        % cnt
                     )
-                    % cnt
                 )
-                hooks.media_files_did_export.append(exportedMedia)
+
+            def do_export():
                 self.exporter.exportInto(file)
-                hooks.media_files_did_export.remove(exportedMedia)
-                period = 3000
-                if self.isVerbatim:
-                    msg = _("Collection exported.")
-                else:
-                    if self.isTextNote:
-                        msg = (
-                            ngettext(
-                                "%d note exported.",
-                                "%d notes exported.",
-                                self.exporter.count,
-                            )
-                            % self.exporter.count
-                        )
-                    else:
-                        msg = (
-                            ngettext(
-                                "%d card exported.",
-                                "%d cards exported.",
-                                self.exporter.count,
-                            )
-                            % self.exporter.count
-                        )
-                tooltip(msg, period=period)
-            finally:
+
+            def on_done(future: Future):
                 self.mw.progress.finish()
-        QDialog.accept(self)
+                hooks.media_files_did_export.remove(exported_media)
+                # raises if exporter failed
+                future.result()
+                self.on_export_finished()
+
+            self.mw.progress.start(immediate=True)
+            hooks.media_files_did_export.append(exported_media)
+
+            self.mw.taskman.run_in_background(do_export, on_done)
+
+    def on_export_finished(self):
+        if self.isVerbatim:
+            msg = _("Collection exported.")
+            self.mw.reopen()
+        else:
+            if self.isTextNote:
+                msg = (
+                    ngettext(
+                        "%d note exported.", "%d notes exported.", self.exporter.count,
+                    )
+                    % self.exporter.count
+                )
+            else:
+                msg = (
+                    ngettext(
+                        "%d card exported.", "%d cards exported.", self.exporter.count,
+                    )
+                    % self.exporter.count
+                )
+        tooltip(msg, period=3000)
+        QDialog.reject(self)

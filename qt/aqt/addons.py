@@ -125,6 +125,9 @@ class AddonMeta:
             return False
         return True
 
+    def is_latest(self, server_update_time: int) -> bool:
+        return self.installed_at >= server_update_time
+
     @staticmethod
     def from_json_meta(dir_name: str, json_meta: Dict[str, Any]) -> AddonMeta:
         return AddonMeta(
@@ -172,7 +175,7 @@ class AddonManager:
         self.mw = mw
         self.dirty = False
         f = self.mw.form
-        f.actionAdd_ons.triggered.connect(self.onAddonsDialog)
+        qconnect(f.actionAdd_ons.triggered, self.onAddonsDialog)
         sys.path.insert(0, self.addonsFolder())
 
     # in new code, you may want all_addon_meta() instead
@@ -525,7 +528,7 @@ and have been disabled: %(found)s"
     def update_supported_version(self, item: UpdateInfo):
         addon = self.addon_meta(str(item.id))
         updated = False
-        is_latest = self.addon_is_latest(item.id, item.current_branch_last_modified)
+        is_latest = addon.is_latest(item.current_branch_last_modified)
 
         # if max different to the stored value
         cur_max = item.current_branch_max_point_ver
@@ -558,14 +561,17 @@ and have been disabled: %(found)s"
         """Return ids of add-ons requiring an update."""
         need_update = []
         for item in items:
-            if not self.addon_is_latest(item.id, item.suitable_branch_last_modified):
+            addon = self.addon_meta(str(item.id))
+            # update if server mtime is newer
+            if not addon.is_latest(item.suitable_branch_last_modified):
+                need_update.append(item.id)
+            elif not addon.compatible() and item.suitable_branch_last_modified > 0:
+                # Addon is currently disabled, and a suitable branch was found on the
+                # server. Ignore our stored mtime (which may have been set incorrectly
+                # in the past) and require an update.
                 need_update.append(item.id)
 
         return need_update
-
-    def addon_is_latest(self, id: int, server_update: int) -> bool:
-        meta = self.addon_meta(str(id))
-        return meta.installed_at >= server_update
 
     # Add-on Config
     ######################################################################
@@ -693,16 +699,16 @@ class AddonsDialog(QDialog):
 
         f = self.form = aqt.forms.addons.Ui_Dialog()
         f.setupUi(self)
-        f.getAddons.clicked.connect(self.onGetAddons)
-        f.installFromFile.clicked.connect(self.onInstallFiles)
-        f.checkForUpdates.clicked.connect(self.check_for_updates)
-        f.toggleEnabled.clicked.connect(self.onToggleEnabled)
-        f.viewPage.clicked.connect(self.onViewPage)
-        f.viewFiles.clicked.connect(self.onViewFiles)
-        f.delete_2.clicked.connect(self.onDelete)
-        f.config.clicked.connect(self.onConfig)
-        self.form.addonList.itemDoubleClicked.connect(self.onConfig)
-        self.form.addonList.currentRowChanged.connect(self._onAddonItemSelected)
+        qconnect(f.getAddons.clicked, self.onGetAddons)
+        qconnect(f.installFromFile.clicked, self.onInstallFiles)
+        qconnect(f.checkForUpdates.clicked, self.check_for_updates)
+        qconnect(f.toggleEnabled.clicked, self.onToggleEnabled)
+        qconnect(f.viewPage.clicked, self.onViewPage)
+        qconnect(f.viewFiles.clicked, self.onViewFiles)
+        qconnect(f.delete_2.clicked, self.onDelete)
+        qconnect(f.config.clicked, self.onConfig)
+        qconnect(self.form.addonList.itemDoubleClicked, self.onConfig)
+        qconnect(self.form.addonList.currentRowChanged, self._onAddonItemSelected)
         self.setAcceptDrops(True)
         self.redrawAddons()
         restoreGeom(self, "addons")
@@ -910,7 +916,7 @@ class GetAddons(QDialog):
         b = self.form.buttonBox.addButton(
             _("Browse Add-ons"), QDialogButtonBox.ActionRole
         )
-        b.clicked.connect(self.onBrowse)
+        qconnect(b.clicked, self.onBrowse)
         restoreGeom(self, "getaddons", adjustSize=True)
         self.exec_()
         saveGeom(self, "getaddons")
@@ -1051,7 +1057,7 @@ class DownloaderInstaller(QObject):
         QObject.__init__(self, parent)
         self.mgr = mgr
         self.client = client
-        self.progressSignal.connect(self._progress_callback)  # type: ignore
+        qconnect(self.progressSignal, self._progress_callback)
 
         def bg_thread_progress(up, down) -> None:
             self.progressSignal.emit(up, down)  # type: ignore
@@ -1277,7 +1283,7 @@ class ConfigEditor(QDialog):
         self.form = aqt.forms.addonconf.Ui_Dialog()
         self.form.setupUi(self)
         restore = self.form.buttonBox.button(QDialogButtonBox.RestoreDefaults)
-        restore.clicked.connect(self.onRestoreDefaults)
+        qconnect(restore.clicked, self.onRestoreDefaults)
         self.setupFonts()
         self.updateHelp()
         self.updateText(self.conf)

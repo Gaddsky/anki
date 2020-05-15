@@ -1,18 +1,17 @@
 // Copyright: Ankitects Pty Ltd and contributors
 // License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
 
-use crate::err::{AnkiError, Result};
-use crate::i18n::{tr_args, tr_strs, FString, I18n};
+use crate::collection::Collection;
+use crate::err::{AnkiError, DBErrorKind, Result};
+use crate::i18n::{tr_args, tr_strs, TR};
 use crate::latex::extract_latex_expanding_clozes;
-use crate::log::{debug, Logger};
-use crate::media::col::{
-    for_every_note, get_note_types, mark_collection_modified, open_or_create_collection_db,
-    set_note, Note,
-};
+use crate::log::debug;
 use crate::media::database::MediaDatabaseContext;
 use crate::media::files::{
-    data_for_file, filename_if_normalized, trash_folder, MEDIA_SYNC_FILESIZE_LIMIT,
+    data_for_file, filename_if_normalized, normalize_nfc_filename, trash_folder,
+    MEDIA_SYNC_FILESIZE_LIMIT,
 };
+use crate::notes::{for_every_note, set_note, Note};
 use crate::text::{normalize_to_nfc, MediaRef};
 use crate::{media::MediaManager, text::extract_media_refs};
 use coarsetime::Instant;
@@ -26,7 +25,7 @@ lazy_static! {
     static ref REMOTE_FILENAME: Regex = Regex::new("(?i)^https?://").unwrap();
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Clone)]
 pub struct MediaCheckOutput {
     pub unused: Vec<String>,
     pub missing: Vec<String>,
@@ -49,34 +48,28 @@ pub struct MediaChecker<'a, P>
 where
     P: FnMut(usize) -> bool,
 {
+    ctx: &'a Collection,
     mgr: &'a MediaManager,
-    col_path: &'a Path,
     progress_cb: P,
     checked: usize,
     progress_updated: Instant,
-    i18n: &'a I18n,
-    log: &'a Logger,
 }
 
 impl<P> MediaChecker<'_, P>
 where
     P: FnMut(usize) -> bool,
 {
-    pub fn new<'a>(
+    pub(crate) fn new<'a>(
+        ctx: &'a mut Collection,
         mgr: &'a MediaManager,
-        col_path: &'a Path,
         progress_cb: P,
-        i18n: &'a I18n,
-        log: &'a Logger,
     ) -> MediaChecker<'a, P> {
         MediaChecker {
+            ctx,
             mgr,
-            col_path,
             progress_cb,
             checked: 0,
             progress_updated: Instant::now(),
-            i18n,
-            log,
         }
     }
 
@@ -100,47 +93,47 @@ where
 
     pub fn summarize_output(&self, output: &mut MediaCheckOutput) -> String {
         let mut buf = String::new();
-        let i = &self.i18n;
+        let i = &self.ctx.i18n;
 
         // top summary area
         if output.trash_count > 0 {
             let megs = (output.trash_bytes as f32) / 1024.0 / 1024.0;
             buf += &i.trn(
-                FString::MediaCheckTrashCount,
+                TR::MediaCheckTrashCount,
                 tr_args!["count"=>output.trash_count, "megs"=>megs],
             );
             buf.push('\n');
         }
 
         buf += &i.trn(
-            FString::MediaCheckMissingCount,
+            TR::MediaCheckMissingCount,
             tr_args!["count"=>output.missing.len()],
         );
         buf.push('\n');
 
         buf += &i.trn(
-            FString::MediaCheckUnusedCount,
+            TR::MediaCheckUnusedCount,
             tr_args!["count"=>output.unused.len()],
         );
         buf.push('\n');
 
         if !output.renamed.is_empty() {
             buf += &i.trn(
-                FString::MediaCheckRenamedCount,
+                TR::MediaCheckRenamedCount,
                 tr_args!["count"=>output.renamed.len()],
             );
             buf.push('\n');
         }
         if !output.oversize.is_empty() {
             buf += &i.trn(
-                FString::MediaCheckOversizeCount,
+                TR::MediaCheckOversizeCount,
                 tr_args!["count"=>output.oversize.len()],
             );
             buf.push('\n');
         }
         if !output.dirs.is_empty() {
             buf += &i.trn(
-                FString::MediaCheckSubfolderCount,
+                TR::MediaCheckSubfolderCount,
                 tr_args!["count"=>output.dirs.len()],
             );
             buf.push('\n');
@@ -149,13 +142,10 @@ where
         buf.push('\n');
 
         if !output.renamed.is_empty() {
-            buf += &i.tr(FString::MediaCheckRenamedHeader);
+            buf += &i.tr(TR::MediaCheckRenamedHeader);
             buf.push('\n');
             for (old, new) in &output.renamed {
-                buf += &i.trn(
-                    FString::MediaCheckRenamedFile,
-                    tr_strs!["old"=>old,"new"=>new],
-                );
+                buf += &i.trn(TR::MediaCheckRenamedFile, tr_strs!["old"=>old,"new"=>new]);
                 buf.push('\n');
             }
             buf.push('\n')
@@ -163,10 +153,10 @@ where
 
         if !output.oversize.is_empty() {
             output.oversize.sort();
-            buf += &i.tr(FString::MediaCheckOversizeHeader);
+            buf += &i.tr(TR::MediaCheckOversizeHeader);
             buf.push('\n');
             for fname in &output.oversize {
-                buf += &i.trn(FString::MediaCheckOversizeFile, tr_strs!["filename"=>fname]);
+                buf += &i.trn(TR::MediaCheckOversizeFile, tr_strs!["filename"=>fname]);
                 buf.push('\n');
             }
             buf.push('\n')
@@ -174,13 +164,10 @@ where
 
         if !output.dirs.is_empty() {
             output.dirs.sort();
-            buf += &i.tr(FString::MediaCheckSubfolderHeader);
+            buf += &i.tr(TR::MediaCheckSubfolderHeader);
             buf.push('\n');
             for fname in &output.dirs {
-                buf += &i.trn(
-                    FString::MediaCheckSubfolderFile,
-                    tr_strs!["filename"=>fname],
-                );
+                buf += &i.trn(TR::MediaCheckSubfolderFile, tr_strs!["filename"=>fname]);
                 buf.push('\n');
             }
             buf.push('\n')
@@ -188,10 +175,10 @@ where
 
         if !output.missing.is_empty() {
             output.missing.sort();
-            buf += &i.tr(FString::MediaCheckMissingHeader);
+            buf += &i.tr(TR::MediaCheckMissingHeader);
             buf.push('\n');
             for fname in &output.missing {
-                buf += &i.trn(FString::MediaCheckMissingFile, tr_strs!["filename"=>fname]);
+                buf += &i.trn(TR::MediaCheckMissingFile, tr_strs!["filename"=>fname]);
                 buf.push('\n');
             }
             buf.push('\n')
@@ -199,10 +186,10 @@ where
 
         if !output.unused.is_empty() {
             output.unused.sort();
-            buf += &i.tr(FString::MediaCheckUnusedHeader);
+            buf += &i.tr(TR::MediaCheckUnusedHeader);
             buf.push('\n');
             for fname in &output.unused {
-                buf += &i.trn(FString::MediaCheckUnusedFile, tr_strs!["filename"=>fname]);
+                buf += &i.trn(TR::MediaCheckUnusedFile, tr_strs!["filename"=>fname]);
                 buf.push('\n');
             }
         }
@@ -248,45 +235,45 @@ where
                 continue;
             }
 
-            // rename if required
-            let (norm_name, renamed_on_disk) = self.normalize_and_maybe_rename(ctx, &disk_fname)?;
-            if renamed_on_disk {
-                out.renamed
-                    .insert(disk_fname.to_string(), norm_name.to_string());
+            if let Some(norm_name) = filename_if_normalized(disk_fname) {
+                out.files.push(norm_name.into_owned());
+            } else {
+                match data_for_file(&self.mgr.media_folder, disk_fname)? {
+                    Some(data) => {
+                        let norm_name = self.normalize_file(ctx, &disk_fname, data)?;
+                        out.renamed
+                            .insert(disk_fname.to_string(), norm_name.to_string());
+                        out.files.push(norm_name.into_owned());
+                    }
+                    None => {
+                        // file not found, caused by the file being removed at this exact instant,
+                        // or the path being larger than MAXPATH on Windows
+                        continue;
+                    }
+                };
             }
-
-            out.files.push(norm_name.into_owned());
         }
 
         Ok(out)
     }
 
-    /// Returns (normalized_form, needs_rename)
-    fn normalize_and_maybe_rename<'a>(
+    /// Write file data to normalized location, moving old file to trash.
+    fn normalize_file<'a>(
         &mut self,
         ctx: &mut MediaDatabaseContext,
         disk_fname: &'a str,
-    ) -> Result<(Cow<'a, str>, bool)> {
-        // already normalized?
-        if let Some(fname) = filename_if_normalized(disk_fname) {
-            return Ok((fname, false));
-        }
-
+        data: Vec<u8>,
+    ) -> Result<Cow<'a, str>> {
         // add a copy of the file using the correct name
-        let data = data_for_file(&self.mgr.media_folder, disk_fname)?.ok_or_else(|| {
-            AnkiError::IOError {
-                info: "file disappeared".into(),
-            }
-        })?;
         let fname = self.mgr.add_file(ctx, disk_fname, &data)?;
-        debug!(self.log, "renamed"; "from"=>disk_fname, "to"=>&fname.as_ref());
+        debug!(self.ctx.log, "renamed"; "from"=>disk_fname, "to"=>&fname.as_ref());
         assert_ne!(fname.as_ref(), disk_fname);
 
         // remove the original file
         let path = &self.mgr.media_folder.join(disk_fname);
         fs::remove_file(path)?;
 
-        Ok((fname, true))
+        Ok(fname)
     }
 
     fn fire_progress_cb(&mut self) -> Result<()> {
@@ -320,7 +307,12 @@ where
                 self.maybe_fire_progress_cb()?;
             }
 
+            if dentry.file_name() == ".DS_Store" {
+                continue;
+            }
+
             let meta = dentry.metadata()?;
+
             total_files += 1;
             total_bytes += meta.len();
         }
@@ -373,7 +365,7 @@ where
                         self.mgr
                             .add_file(&mut self.mgr.dbctx(), fname.as_ref(), &data)?;
                 } else {
-                    debug!(self.log, "file disappeared while restoring trash"; "fname"=>fname.as_ref());
+                    debug!(self.ctx.log, "file disappeared while restoring trash"; "fname"=>fname.as_ref());
                 }
                 fs::remove_file(dentry.path())?;
             }
@@ -387,26 +379,29 @@ where
         &mut self,
         renamed: &HashMap<String, String>,
     ) -> Result<HashSet<String>> {
-        let mut db = open_or_create_collection_db(self.col_path)?;
-        let trx = db.transaction()?;
-
         let mut referenced_files = HashSet::new();
-        let note_types = get_note_types(&trx)?;
+        let note_types = self.ctx.storage.get_all_notetypes()?;
         let mut collection_modified = false;
 
-        for_every_note(&trx, |note| {
+        for_every_note(&self.ctx.storage.db, |note| {
             self.checked += 1;
             if self.checked % 10 == 0 {
                 self.maybe_fire_progress_cb()?;
             }
             let nt = note_types
-                .get(&note.mid)
+                .get(&note.ntid)
                 .ok_or_else(|| AnkiError::DBError {
                     info: "missing note type".to_string(),
+                    kind: DBErrorKind::MissingEntity,
                 })?;
-            if fix_and_extract_media_refs(note, &mut referenced_files, renamed)? {
+            if fix_and_extract_media_refs(
+                note,
+                &mut referenced_files,
+                renamed,
+                &self.mgr.media_folder,
+            )? {
                 // note was modified, needs saving
-                set_note(&trx, note, nt)?;
+                set_note(&self.ctx.storage.db, note, nt)?;
                 collection_modified = true;
             }
 
@@ -414,11 +409,6 @@ where
             extract_latex_refs(note, &mut referenced_files, nt.latex_uses_svg());
             Ok(())
         })?;
-
-        if collection_modified {
-            mark_collection_modified(&trx)?;
-            trx.commit()?;
-        }
 
         Ok(referenced_files)
     }
@@ -429,11 +419,17 @@ fn fix_and_extract_media_refs(
     note: &mut Note,
     seen_files: &mut HashSet<String>,
     renamed: &HashMap<String, String>,
+    media_folder: &Path,
 ) -> Result<bool> {
     let mut updated = false;
 
     for idx in 0..note.fields().len() {
-        let field = normalize_and_maybe_rename_files(&note.fields()[idx], renamed, seen_files);
+        let field = normalize_and_maybe_rename_files(
+            &note.fields()[idx],
+            renamed,
+            seen_files,
+            media_folder,
+        );
         if let Cow::Owned(field) = field {
             // field was modified, need to save
             note.set_field(idx, field)?;
@@ -450,6 +446,7 @@ fn normalize_and_maybe_rename_files<'a>(
     field: &'a str,
     renamed: &HashMap<String, String>,
     seen_files: &mut HashSet<String>,
+    media_folder: &Path,
 ) -> Cow<'a, str> {
     let refs = extract_media_refs(field);
     let mut field: Cow<str> = field.into();
@@ -466,7 +463,21 @@ fn normalize_and_maybe_rename_files<'a>(
         if let Some(new_name) = renamed.get(fname.as_ref()) {
             fname = new_name.to_owned().into();
         }
-        // if it was not in NFC or was renamed, update the field
+        // if the filename was in NFC and was not renamed as part of the
+        // media check, it may have already been renamed during a previous
+        // sync. If that's the case and the renamed version exists on disk,
+        // we'll need to update the field to match it. It may be possible
+        // to remove this check in the future once we can be sure all media
+        // files stored on AnkiWeb are in normalized form.
+        if matches!(fname, Cow::Borrowed(_)) {
+            if let Cow::Owned(normname) = normalize_nfc_filename(fname.as_ref().into()) {
+                let path = media_folder.join(&normname);
+                if path.exists() {
+                    fname = normname.into();
+                }
+            }
+        }
+        // update the field if the filename was modified
         if let Cow::Owned(ref new_name) = fname {
             field = rename_media_ref_in_field(field.as_ref(), &media_ref, new_name).into();
         }
@@ -510,41 +521,42 @@ fn extract_latex_refs(note: &Note, seen_files: &mut HashSet<String>, svg: bool) 
 }
 
 #[cfg(test)]
-mod test {
+pub(crate) mod test {
+    pub(crate) const MEDIACHECK_ANKI2: &'static [u8] =
+        include_bytes!("../../tests/support/mediacheck.anki2");
+
+    use crate::collection::{open_collection, Collection};
     use crate::err::Result;
     use crate::i18n::I18n;
     use crate::log;
-    use crate::log::Logger;
     use crate::media::check::{MediaCheckOutput, MediaChecker};
     use crate::media::files::trash_folder;
     use crate::media::MediaManager;
-    use std::path::{Path, PathBuf};
+    use std::path::Path;
     use std::{fs, io};
     use tempfile::{tempdir, TempDir};
 
-    fn common_setup() -> Result<(TempDir, MediaManager, PathBuf, Logger, I18n)> {
+    fn common_setup() -> Result<(TempDir, MediaManager, Collection)> {
         let dir = tempdir()?;
         let media_dir = dir.path().join("media");
         fs::create_dir(&media_dir)?;
         let media_db = dir.path().join("media.db");
         let col_path = dir.path().join("col.anki2");
-        fs::write(
-            &col_path,
-            &include_bytes!("../../tests/support/mediacheck.anki2")[..],
-        )?;
+        fs::write(&col_path, MEDIACHECK_ANKI2)?;
 
-        let mgr = MediaManager::new(&media_dir, media_db)?;
+        let mgr = MediaManager::new(&media_dir, media_db.clone())?;
 
         let log = log::terminal();
-
         let i18n = I18n::new(&["zz"], "dummy", log.clone());
 
-        Ok((dir, mgr, col_path, log, i18n))
+        let col = open_collection(col_path, media_dir, media_db, false, i18n, log)?;
+
+        Ok((dir, mgr, col))
     }
 
     #[test]
     fn media_check() -> Result<()> {
-        let (_dir, mgr, col_path, log, i18n) = common_setup()?;
+        let (_dir, mgr, mut col) = common_setup()?;
 
         // add some test files
         fs::write(&mgr.media_folder.join("zerobytes"), "")?;
@@ -555,8 +567,13 @@ mod test {
         fs::write(&mgr.media_folder.join("unused.jpg"), "foo")?;
 
         let progress = |_n| true;
-        let mut checker = MediaChecker::new(&mgr, &col_path, progress, &i18n, &log);
-        let mut output = checker.check()?;
+
+        let (output, report) = col.transact(None, |ctx| {
+            let mut checker = MediaChecker::new(ctx, &mgr, progress);
+            let output = checker.check()?;
+            let summary = checker.summarize_output(&mut output.clone());
+            Ok((output, summary))
+        })?;
 
         assert_eq!(
             output,
@@ -576,7 +593,6 @@ mod test {
         assert!(fs::metadata(&mgr.media_folder.join("foo[.jpg")).is_err());
         assert!(fs::metadata(&mgr.media_folder.join("foo.jpg")).is_ok());
 
-        let report = checker.summarize_output(&mut output);
         assert_eq!(
             report,
             "Missing files: 1
@@ -616,14 +632,16 @@ Unused: unused.jpg
 
     #[test]
     fn trash_handling() -> Result<()> {
-        let (_dir, mgr, col_path, log, i18n) = common_setup()?;
+        let (_dir, mgr, mut col) = common_setup()?;
         let trash_folder = trash_folder(&mgr.media_folder)?;
         fs::write(trash_folder.join("test.jpg"), "test")?;
 
         let progress = |_n| true;
-        let mut checker = MediaChecker::new(&mgr, &col_path, progress, &i18n, &log);
 
-        checker.restore_trash()?;
+        col.transact(None, |ctx| {
+            let mut checker = MediaChecker::new(ctx, &mgr, progress);
+            checker.restore_trash()
+        })?;
 
         // file should have been moved to media folder
         assert_eq!(files_in_dir(&trash_folder), Vec::<String>::new());
@@ -634,7 +652,10 @@ Unused: unused.jpg
 
         // if we repeat the process, restoring should do the same thing if the contents are equal
         fs::write(trash_folder.join("test.jpg"), "test")?;
-        checker.restore_trash()?;
+        col.transact(None, |ctx| {
+            let mut checker = MediaChecker::new(ctx, &mgr, progress);
+            checker.restore_trash()
+        })?;
         assert_eq!(files_in_dir(&trash_folder), Vec::<String>::new());
         assert_eq!(
             files_in_dir(&mgr.media_folder),
@@ -643,7 +664,10 @@ Unused: unused.jpg
 
         // but rename if required
         fs::write(trash_folder.join("test.jpg"), "test2")?;
-        checker.restore_trash()?;
+        col.transact(None, |ctx| {
+            let mut checker = MediaChecker::new(ctx, &mgr, progress);
+            checker.restore_trash()
+        })?;
         assert_eq!(files_in_dir(&trash_folder), Vec::<String>::new());
         assert_eq!(
             files_in_dir(&mgr.media_folder),
@@ -658,13 +682,17 @@ Unused: unused.jpg
 
     #[test]
     fn unicode_normalization() -> Result<()> {
-        let (_dir, mgr, col_path, log, i18n) = common_setup()?;
+        let (_dir, mgr, mut col) = common_setup()?;
 
         fs::write(&mgr.media_folder.join("ぱぱ.jpg"), "nfd encoding")?;
 
         let progress = |_n| true;
-        let mut checker = MediaChecker::new(&mgr, &col_path, progress, &i18n, &log);
-        let mut output = checker.check()?;
+
+        let mut output = col.transact(None, |ctx| {
+            let mut checker = MediaChecker::new(ctx, &mgr, progress);
+            checker.check()
+        })?;
+
         output.missing.sort();
 
         if cfg!(target_vendor = "apple") {

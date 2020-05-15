@@ -38,11 +38,6 @@ hooks = [
         legacy_hook="exportersList",
     ),
     Hook(
-        name="search_terms_prepared",
-        args=["searches: Dict[str, Callable]"],
-        legacy_hook="search",
-    ),
-    Hook(
         name="note_type_added",
         args=["notetype: Dict[str, Any]"],
         legacy_hook="newModel",
@@ -56,9 +51,7 @@ hooks = [
         return_type="bool",
         doc="Warning: this is called on a background thread.",
     ),
-    Hook(
-        name="tag_added", args=["tag: str"], legacy_hook="newTag", legacy_no_args=True,
-    ),
+    Hook(name="tag_list_did_update"),
     Hook(
         name="field_filter",
         args=[

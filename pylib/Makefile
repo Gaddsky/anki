@@ -1,11 +1,27 @@
 SHELL := /bin/bash
-FIND := $(if $(wildcard /bin/find),/bin/find,/usr/bin/find)
 
-.SHELLFLAGS := -eu -o pipefail -c
-.DELETE_ON_ERROR:
+ifndef SHELLFLAGS
+	SHELLFLAGS :=
+endif
+
+.SHELLFLAGS := -eu -o pipefail ${SHELLFLAGS} -c
 MAKEFLAGS += --warn-undefined-variables
 MAKEFLAGS += --no-builtin-rules
+
 RUNARGS :=
+MYPY_ARGS :=
+FIND := $(if $(wildcard /bin/find),/bin/find,/usr/bin/find)
+
+ifndef OS
+	OS := unknown
+endif
+
+# https://anki.tenderapp.com/discussions/beta-testing/1860-error-unused-type-ignore-comment
+ifneq (${OS},Windows_NT)
+	MYPY_ARGS := --warn-unused-ignores
+endif
+
+.DELETE_ON_ERROR:
 .SUFFIXES:
 BLACKARGS := -t py36 anki tests setup.py tools/*.py --exclude='_pb2|buildinfo'
 ISORTARGS := anki tests setup.py
@@ -16,7 +32,7 @@ PHONY: all
 all: check
 
 .build/run-deps: setup.py
-	python -m pip install -e .
+	SKIP_ANKI_RSPY=true python -m pip install -e .
 	@touch $@
 
 .build/dev-deps: requirements.dev
@@ -33,10 +49,10 @@ PROTODEPS := $(wildcard ../proto/*.proto)
 
 .build/hooks: tools/genhooks.py tools/hookslib.py
 	python tools/genhooks.py
-	black anki/hooks.py
+	python -m black anki/hooks.py
 	@touch $@
 
-BUILD_STEPS := .build/run-deps .build/dev-deps .build/py-proto anki/buildinfo.py .build/hooks
+BUILD_STEPS := .build/vernum .build/run-deps .build/dev-deps .build/py-proto anki/buildinfo.py .build/hooks
 
 # Checking
 ######################
@@ -47,7 +63,7 @@ check: $(BUILD_STEPS) .build/mypy .build/test .build/fmt .build/imports .build/l
 .PHONY: fix
 fix: $(BUILD_STEPS)
 	isort $(ISORTARGS)
-	black $(BLACKARGS)
+	python -m black $(BLACKARGS)
 
 .PHONY: clean
 clean:
@@ -56,18 +72,19 @@ clean:
 # Checking python
 ######################
 
-CHECKDEPS := $(shell ${FIND} anki tests -name '*.py' | grep -v buildinfo.py)
+CHECKDEPS := $(shell "${FIND}" anki tests -name '*.py' | grep -v buildinfo.py)
 
 .build/mypy: $(CHECKDEPS)
-	mypy anki
+	python -m mypy ${MYPY_ARGS} anki
 	@touch $@
 
 .build/test: $(CHECKDEPS)
-	python -m pytest --durations=1 -s
+	SHIFT_CLOCK_HACK=1 python -m pytest --durations=1 -s
 	@touch $@
 
 .build/lint: $(CHECKDEPS)
-	pylint -j 0 --rcfile=.pylintrc -f colorized --extension-pkg-whitelist=ankirspy anki tests setup.py
+	python -m pylint -j 0 --rcfile=.pylintrc -f colorized \
+		--extension-pkg-whitelist=ankirspy anki tests setup.py
 	@touch $@
 
 .build/imports: $(CHECKDEPS)
@@ -75,17 +92,20 @@ CHECKDEPS := $(shell ${FIND} anki tests -name '*.py' | grep -v buildinfo.py)
 	@touch $@
 
 .build/fmt: $(CHECKDEPS)
-	black --check $(BLACKARGS)
+	python -m black --check $(BLACKARGS)
 	@touch $@
 
 # Building
 ######################
 
 .PHONY: build
-build: $(BUILD_STEPS) $(CHECKDEPS)
+build: .build/build
+
+.build/build: $(BUILD_STEPS) $(CHECKDEPS)
 	rm -rf dist build
 	python setup.py -q bdist_wheel
 	rsync -a dist/*.whl ../dist/
+	touch $@
 
 # prepare code for running in place
 .PHONY: develop
@@ -94,3 +114,10 @@ develop: $(BUILD_STEPS)
 anki/buildinfo.py: ../meta/version ../meta/buildhash
 	echo "buildhash='$$(cat ../meta/buildhash)'" > $@
 	echo "version='$$(cat ../meta/version)'" >> $@
+
+VER := $(shell cat ../meta/version)
+.build/vernum: ../meta/version
+	sed -i.bak 's/.*automatically updated 1.*/    install_requires.append("ankirspy==$(VER)")  # automatically updated 1/' setup.py
+	sed -i.bak 's/.*automatically updated 2.*/    version="$(VER)",  # automatically updated 2/' setup.py
+	rm setup.py.bak
+	@touch $@

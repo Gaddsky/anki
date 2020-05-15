@@ -7,6 +7,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from anki.collection import _Collection
 from anki.consts import *
+from anki.decks import DeckManager
 from anki.importing.base import Importer
 from anki.lang import _
 from anki.storage import Collection
@@ -40,7 +41,7 @@ class Anki2Importer(Importer):
         try:
             self._import()
         finally:
-            self.src.close(save=False)
+            self.src.close(save=False, downgrade=False)
 
     def _prepareFiles(self) -> None:
         importingV2 = self.file.endswith(".anki21")
@@ -65,10 +66,7 @@ class Anki2Importer(Importer):
         self._importCards()
         self._importStaticMedia()
         self._postImport()
-        self.dst.db.setAutocommit(True)
-        self.dst.db.execute("vacuum")
-        self.dst.db.execute("analyze")
-        self.dst.db.setAutocommit(False)
+        self.dst.optimize()
 
     # Notes
     ######################################################################
@@ -260,13 +258,13 @@ class Anki2Importer(Importer):
         name = g["name"]
         # if there's a prefix, replace the top level deck
         if self.deckPrefix:
-            tmpname = "::".join(name.split("::")[1:])
+            tmpname = "::".join(DeckManager.path(name)[1:])
             name = self.deckPrefix
             if tmpname:
                 name += "::" + tmpname
         # manually create any parents so we can pull in descriptions
         head = ""
-        for parent in name.split("::")[:-1]:
+        for parent in DeckManager.immediate_parent_path(name):
             if head:
                 head += "::"
             head += parent
@@ -280,9 +278,9 @@ class Anki2Importer(Importer):
         newid = self.dst.decks.id(name)
         # pull conf over
         if "conf" in g and g["conf"] != 1:
-            conf = self.src.decks.getConf(g["conf"])
+            conf = self.src.decks.get_config(g["conf"])
             self.dst.decks.save(conf)
-            self.dst.decks.updateConf(conf)
+            self.dst.decks.update_config(conf)
             g2 = self.dst.decks.get(newid)
             g2["conf"] = g["conf"]
             self.dst.decks.save(g2)

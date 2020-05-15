@@ -5,7 +5,6 @@ from __future__ import annotations
 
 import copy
 import datetime
-import json
 import os
 import pprint
 import random
@@ -15,15 +14,16 @@ import time
 import traceback
 import unicodedata
 import weakref
-from typing import Any, Dict, Iterable, List, Optional, Tuple, Union
+from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple, Union
 
 import anki.find
 import anki.latex  # sets up hook
 import anki.template
 from anki import hooks
 from anki.cards import Card
+from anki.config import ConfigManager
 from anki.consts import *
-from anki.db import DB
+from anki.dbproxy import DBProxy
 from anki.decks import DeckManager
 from anki.errors import AnkiError
 from anki.lang import _, ngettext
@@ -45,29 +45,10 @@ from anki.utils import (
     stripHTMLMedia,
 )
 
-defaultConf = {
-    # review options
-    "activeDecks": [1],
-    "curDeck": 1,
-    "newSpread": NEW_CARDS_DISTRIBUTE,
-    "collapseTime": 1200,
-    "timeLim": 0,
-    "estTimes": True,
-    "dueCounts": True,
-    # other config
-    "curModel": None,
-    "nextPos": 1,
-    "sortType": "noteFld",
-    "sortBackwards": False,
-    "addToCur": True,  # add new to currently selected deck?
-    "dayLearnFirst": False,
-    "schedVer": 1,
-}
-
 
 # this is initialized by storage.Collection
 class _Collection:
-    db: Optional[DB]
+    db: Optional[DBProxy]
     sched: Union[V1Scheduler, V2Scheduler]
     crt: int
     mod: int
@@ -75,12 +56,11 @@ class _Collection:
     dty: bool  # no longer used
     _usn: int
     ls: int
-    conf: Dict[str, Any]
     _undo: List[Any]
 
     def __init__(
         self,
-        db: DB,
+        db: DBProxy,
         backend: RustBackend,
         server: Optional["anki.storage.ServerData"] = None,
         log: bool = False,
@@ -98,6 +78,7 @@ class _Collection:
         self.models = ModelManager(self)
         self.decks = DeckManager(self)
         self.tags = TagManager(self)
+        self.conf = ConfigManager(self)
         self.load()
         if not self.crt:
             d = datetime.datetime.today()
@@ -139,10 +120,6 @@ class _Collection:
             self.sched = V1Scheduler(self)
         elif ver == 2:
             self.sched = V2Scheduler(self)
-            if not self.server:
-                self.conf["localOffset"] = self.sched._current_timezone_offset()
-            elif self.server.minutes_west is not None:
-                self.conf["localOffset"] = self.server.minutes_west
 
     def changeSchedulerVer(self, ver: int) -> None:
         if ver == self.schedVer():
@@ -165,12 +142,13 @@ class _Collection:
 
         self._loadScheduler()
 
+    # the sync code uses this to send the local timezone to AnkiWeb
     def localOffset(self) -> Optional[int]:
         "Minutes west of UTC. Only applies to V2 scheduler."
         if isinstance(self.sched, V1Scheduler):
             return None
         else:
-            return self.sched._current_timezone_offset()
+            return self.backend.local_minutes_west(intTime())
 
     # DB-related
     ##########################################################################
@@ -183,26 +161,22 @@ class _Collection:
             self.dty,  # no longer used
             self._usn,
             self.ls,
-            conf,
-            models,
             decks,
-            dconf,
-            tags,
         ) = self.db.first(
             """
 select crt, mod, scm, dty, usn, ls,
-conf, models, decks, dconf, tags from col"""
+decks from col"""
         )
-        self.conf = json.loads(conf)
-        self.models.load(models)
-        self.decks.load(decks, dconf)
-        self.tags.load(tags)
+        self.decks.decks = self.backend.get_all_decks()
+        self.decks.changed = False
+        self.models.models = self.backend.get_all_notetypes()
+        self.models.changed = False
 
     def setMod(self) -> None:
         """Mark DB modified.
 
-DB operations and the deck/tag/model managers do this automatically, so this
-is only necessary if you modify properties of this object or the conf dict."""
+DB operations and the deck/model managers do this automatically, so this
+is only necessary if you modify properties of this object."""
         self.db.mod = True
 
     def flush(self, mod: Optional[int] = None) -> None:
@@ -210,28 +184,40 @@ is only necessary if you modify properties of this object or the conf dict."""
         self.mod = intTime(1000) if mod is None else mod
         self.db.execute(
             """update col set
-crt=?, mod=?, scm=?, dty=?, usn=?, ls=?, conf=?""",
+crt=?, mod=?, scm=?, dty=?, usn=?, ls=?""",
             self.crt,
             self.mod,
             self.scm,
             self.dty,
             self._usn,
             self.ls,
-            json.dumps(self.conf),
         )
 
-    def save(self, name: Optional[str] = None, mod: Optional[int] = None) -> None:
-        "Flush, commit DB, and take out another write lock."
-        # let the managers conditionally flush
+    def flush_all_changes(self, mod: Optional[int] = None):
         self.models.flush()
         self.decks.flush()
-        self.tags.flush()
+        # set mod flag if mtime changed by backend
+        if self.db.scalar("select mod from col") != self.mod:
+            self.db.mod = True
+        if self.db.mod:
+            self.flush(mod)
+
+    def save(
+        self, name: Optional[str] = None, mod: Optional[int] = None, trx: bool = True
+    ) -> None:
+        "Flush, commit DB, and take out another write lock if trx=True."
+        self.flush_all_changes(mod)
         # and flush deck + bump mod if db has been changed
         if self.db.mod:
-            self.flush(mod=mod)
             self.db.commit()
-            self.lock()
             self.db.mod = False
+            if trx:
+                self.db.begin()
+        elif not trx:
+            # if no changes were pending but calling code expects to be
+            # outside of a transaction, we need to roll back
+            self.db.rollback()
+
         self._markOp(name)
         self._lastSave = time.time()
 
@@ -242,39 +228,22 @@ crt=?, mod=?, scm=?, dty=?, usn=?, ls=?, conf=?""",
             return True
         return None
 
-    def lock(self) -> None:
-        # make sure we don't accidentally bump mod time
-        mod = self.db.mod
-        self.db.execute("update col set mod=mod")
-        self.db.mod = mod
-
-    def close(self, save: bool = True) -> None:
+    def close(self, save: bool = True, downgrade: bool = False) -> None:
         "Disconnect from DB."
         if self.db:
             if save:
-                self.save()
+                self.save(trx=False)
             else:
                 self.db.rollback()
-            if not self.server:
-                self.db.setAutocommit(True)
-                self.db.execute("pragma journal_mode = delete")
-                self.db.setAutocommit(False)
-            self.db.close()
+            self.backend.close_collection(downgrade=downgrade)
             self.db = None
             self.media.close()
             self._closeLog()
 
-    def reopen(self) -> None:
-        "Reconnect to DB (after changing threads, etc)."
-        if not self.db:
-            self.db = DB(self.path)
-            self.media.connect()
-            self._openLog()
-
     def rollback(self) -> None:
         self.db.rollback()
+        self.db.begin()
         self.load()
-        self.lock()
 
     def modSchema(self, check: bool) -> None:
         "Mark schema modified. Call this first so user can abort if necessary."
@@ -283,6 +252,7 @@ crt=?, mod=?, scm=?, dty=?, usn=?, ls=?, conf=?""",
                 raise AnkiError("abortSchemaMod")
         self.scm = intTime(1000)
         self.setMod()
+        self.save()
 
     def schemaChanged(self) -> Any:
         "True if schema changed since last sync."
@@ -300,15 +270,15 @@ crt=?, mod=?, scm=?, dty=?, usn=?, ls=?, conf=?""",
         self.db.execute("delete from graves")
         self._usn += 1
         self.models.beforeUpload()
-        self.tags.beforeUpload()
         self.decks.beforeUpload()
+        self.backend.before_upload()
         self.modSchema(check=False)
         self.ls = self.scm
         # ensure db is compacted before upload
-        self.db.setAutocommit(True)
+        self.save(trx=False)
         self.db.execute("vacuum")
         self.db.execute("analyze")
-        self.close()
+        self.close(save=False, downgrade=True)
 
     # Object creation helpers
     ##########################################################################
@@ -626,11 +596,27 @@ where c.nid = n.id and c.id in %s group by nid"""
     # Finding cards
     ##########################################################################
 
-    def findCards(self, query: str, order: Union[bool, str] = False) -> Any:
-        return anki.find.Finder(self).findCards(query, order)
+    # if order=True, use the sort order stored in the collection config
+    # if order=False, do no ordering
+    #
+    # if order is a string, that text is added after 'order by' in the sql statement.
+    # you must add ' asc' or ' desc' to the order, as Anki will replace asc with
+    # desc and vice versa when reverse is set in the collection config, eg
+    # order="c.ivl asc, c.due desc"
+    #
+    # if order is an int enum, sort using that builtin sort, eg
+    # col.find_cards("", order=BuiltinSortKind.CARD_DUE)
+    # the reverse argument only applies when a BuiltinSortKind is provided;
+    # otherwise the collection config defines whether reverse is set or not
+    def find_cards(
+        self, query: str, order: Union[bool, str, int] = False, reverse: bool = False,
+    ) -> Sequence[int]:
+        self.flush_all_changes()
+        return self.backend.search_cards(query, order, reverse)
 
-    def findNotes(self, query: str) -> Any:
-        return anki.find.Finder(self).findNotes(query)
+    def find_notes(self, query: str) -> Sequence[int]:
+        self.flush_all_changes()
+        return self.backend.search_notes(query)
 
     def findReplace(
         self,
@@ -645,6 +631,26 @@ where c.nid = n.id and c.id in %s group by nid"""
 
     def findDupes(self, fieldName: str, search: str = "") -> List[Tuple[Any, list]]:
         return anki.find.findDupes(self, fieldName, search)
+
+    findCards = find_cards
+    findNotes = find_notes
+
+    # Config
+    ##########################################################################
+
+    def get_config(self, key: str, default: Any = None) -> Any:
+        try:
+            return self.conf.get_immutable(key)
+        except KeyError:
+            return default
+
+    def set_config(self, key: str, val: Any):
+        self.setMod()
+        self.conf.set(key, val)
+
+    def remove_config(self, key):
+        self.setMod()
+        self.conf.remove(key)
 
     # Stats
     ##########################################################################
@@ -731,7 +737,7 @@ where c.nid = n.id and c.id in %s group by nid"""
             c.nid,
         )
         # and finally, update daily counts
-        n = 1 if c.queue == 3 else c.queue
+        n = 1 if c.queue in (3, 4) else c.queue
         type = ("new", "lrn", "rev")[n]
         self.sched._updateStats(c, type, -1)
         self.sched.reps -= 1
@@ -793,7 +799,6 @@ select id from notes where mid = ?) limit 1"""
         problems = []
         # problems that don't require a full sync
         syncable_problems = []
-        curs = self.db.cursor()
         self.save()
         oldSize = os.stat(self.path)[stat.ST_SIZE]
         if self.db.scalar("pragma integrity_check") != "ok":
@@ -942,16 +947,18 @@ select id from cards where odid > 0 and did in %s"""
             self.updateFieldCache(self.models.nids(m))
         # new cards can't have a due position > 32 bits, so wrap items over
         # 2 million back to 1 million
-        curs.execute(
+        self.db.execute(
             """
 update cards set due=1000000+due%1000000,mod=?,usn=? where due>=1000000
-and type=0""",
-            [intTime(), self.usn()],
+and type=0 and queue!=4""",
+            intTime(),
+            self.usn(),
         )
-        if curs.rowcount:
-            problems.append(
+        rowcount = self.db.scalar("select changes()")
+        if rowcount:
+            syncable_problems.append(
                 "Found %d new cards with a due number >= 1,000,000 - consider repositioning them in the Browse screen."
-                % curs.rowcount
+                % rowcount
             )
         # new card position
         self.conf["nextPos"] = (
@@ -969,18 +976,20 @@ and type=0""",
                 self.usn(),
             )
         # v2 sched had a bug that could create decimal intervals
-        curs.execute(
+        self.db.execute(
             "update cards set ivl=round(ivl),due=round(due) where ivl!=round(ivl) or due!=round(due)"
         )
-        if curs.rowcount:
-            problems.append("Fixed %d cards with v2 scheduler bug." % curs.rowcount)
+        rowcount = self.db.scalar("select changes()")
+        if rowcount:
+            problems.append("Fixed %d cards with v2 scheduler bug." % rowcount)
 
-        curs.execute(
+        self.db.execute(
             "update revlog set ivl=round(ivl),lastIvl=round(lastIvl) where ivl!=round(ivl) or lastIvl!=round(lastIvl)"
         )
-        if curs.rowcount:
+        rowcount = self.db.scalar("select changes()")
+        if rowcount:
             problems.append(
-                "Fixed %d review history entries with v2 scheduler bug." % curs.rowcount
+                "Fixed %d review history entries with v2 scheduler bug." % rowcount
             )
         # models
         if self.models.ensureNotEmpty():
@@ -1001,9 +1010,13 @@ and type=0""",
     def _normalize_tags(self) -> int:
         to_fix = []
         for id, tags in self.db.execute("select id, tags from notes"):
-            nfc = unicodedata.normalize("NFC", tags)
-            if nfc != tags:
-                to_fix.append((nfc, self.usn(), intTime(), id))
+            norm = unicodedata.normalize("NFC", tags)
+            if not norm.strip():
+                norm = ""
+            elif not norm.startswith(" ") or not norm.endswith(" "):
+                norm = " " + norm + " "
+            if norm != tags:
+                to_fix.append((norm, self.usn(), intTime(), id))
         if to_fix:
             self.db.executemany(
                 "update notes set tags=?, usn=?, mod=? where id=?", to_fix
@@ -1011,11 +1024,10 @@ and type=0""",
         return len(to_fix)
 
     def optimize(self) -> None:
-        self.db.setAutocommit(True)
+        self.save(trx=False)
         self.db.execute("vacuum")
         self.db.execute("analyze")
-        self.db.setAutocommit(False)
-        self.lock()
+        self.db.begin()
 
     # Logging
     ##########################################################################

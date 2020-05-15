@@ -13,7 +13,8 @@ import anki
 import aqt
 from anki.cards import Card
 from anki.hooks import runFilter, runHook
-from aqt.qt import QDialog, QMenu
+from aqt.qt import QDialog, QEvent, QMenu
+from aqt.tagedit import TagEdit
 
 # New hook/filter handling
 ##############################################################################
@@ -47,6 +48,67 @@ class _AddCardsDidAddNoteHook:
 
 
 add_cards_did_add_note = _AddCardsDidAddNoteHook()
+
+
+class _AddCardsDidInitHook:
+    _hooks: List[Callable[["aqt.addcards.AddCards"], None]] = []
+
+    def append(self, cb: Callable[["aqt.addcards.AddCards"], None]) -> None:
+        """(addcards: aqt.addcards.AddCards)"""
+        self._hooks.append(cb)
+
+    def remove(self, cb: Callable[["aqt.addcards.AddCards"], None]) -> None:
+        if cb in self._hooks:
+            self._hooks.remove(cb)
+
+    def __call__(self, addcards: aqt.addcards.AddCards) -> None:
+        for hook in self._hooks:
+            try:
+                hook(addcards)
+            except:
+                # if the hook fails, remove it
+                self._hooks.remove(hook)
+                raise
+
+
+add_cards_did_init = _AddCardsDidInitHook()
+
+
+class _AddCardsWillAddNoteFilter:
+    """Decides whether the note should be added to the collection or
+        not. It is assumed to come from the addCards window.
+
+        reason_to_already_reject is the first reason to reject that
+        was found, or None. If your filter wants to reject, it should
+        replace return the reason to reject. Otherwise return the
+        input."""
+
+    _hooks: List[Callable[[Optional[str], "anki.notes.Note"], Optional[str]]] = []
+
+    def append(
+        self, cb: Callable[[Optional[str], "anki.notes.Note"], Optional[str]]
+    ) -> None:
+        """(problem: Optional[str], note: anki.notes.Note)"""
+        self._hooks.append(cb)
+
+    def remove(
+        self, cb: Callable[[Optional[str], "anki.notes.Note"], Optional[str]]
+    ) -> None:
+        if cb in self._hooks:
+            self._hooks.remove(cb)
+
+    def __call__(self, problem: Optional[str], note: anki.notes.Note) -> Optional[str]:
+        for filter in self._hooks:
+            try:
+                problem = filter(problem, note)
+            except:
+                # if the hook fails, remove it
+                self._hooks.remove(filter)
+                raise
+        return problem
+
+
+add_cards_will_add_note = _AddCardsWillAddNoteFilter()
 
 
 class _AddCardsWillShowHistoryMenuHook:
@@ -272,6 +334,30 @@ class _AvPlayerWillPlayHook:
 av_player_will_play = _AvPlayerWillPlayHook()
 
 
+class _BackupDidCompleteHook:
+    _hooks: List[Callable[[], None]] = []
+
+    def append(self, cb: Callable[[], None]) -> None:
+        """()"""
+        self._hooks.append(cb)
+
+    def remove(self, cb: Callable[[], None]) -> None:
+        if cb in self._hooks:
+            self._hooks.remove(cb)
+
+    def __call__(self) -> None:
+        for hook in self._hooks:
+            try:
+                hook()
+            except:
+                # if the hook fails, remove it
+                self._hooks.remove(hook)
+                raise
+
+
+backup_did_complete = _BackupDidCompleteHook()
+
+
 class _BrowserDidChangeRowHook:
     _hooks: List[Callable[["aqt.browser.Browser"], None]] = []
 
@@ -296,6 +382,56 @@ class _BrowserDidChangeRowHook:
 
 
 browser_did_change_row = _BrowserDidChangeRowHook()
+
+
+class _BrowserDidSearchHook:
+    """Allows you to modify the list of returned card ids from a search."""
+
+    _hooks: List[Callable[["aqt.browser.SearchContext"], None]] = []
+
+    def append(self, cb: Callable[["aqt.browser.SearchContext"], None]) -> None:
+        """(context: aqt.browser.SearchContext)"""
+        self._hooks.append(cb)
+
+    def remove(self, cb: Callable[["aqt.browser.SearchContext"], None]) -> None:
+        if cb in self._hooks:
+            self._hooks.remove(cb)
+
+    def __call__(self, context: aqt.browser.SearchContext) -> None:
+        for hook in self._hooks:
+            try:
+                hook(context)
+            except:
+                # if the hook fails, remove it
+                self._hooks.remove(hook)
+                raise
+
+
+browser_did_search = _BrowserDidSearchHook()
+
+
+class _BrowserHeaderWillShowContextMenuHook:
+    _hooks: List[Callable[["aqt.browser.Browser", QMenu], None]] = []
+
+    def append(self, cb: Callable[["aqt.browser.Browser", QMenu], None]) -> None:
+        """(browser: aqt.browser.Browser, menu: QMenu)"""
+        self._hooks.append(cb)
+
+    def remove(self, cb: Callable[["aqt.browser.Browser", QMenu], None]) -> None:
+        if cb in self._hooks:
+            self._hooks.remove(cb)
+
+    def __call__(self, browser: aqt.browser.Browser, menu: QMenu) -> None:
+        for hook in self._hooks:
+            try:
+                hook(browser, menu)
+            except:
+                # if the hook fails, remove it
+                self._hooks.remove(hook)
+                raise
+
+
+browser_header_will_show_context_menu = _BrowserHeaderWillShowContextMenuHook()
 
 
 class _BrowserMenusDidInitHook:
@@ -421,6 +557,42 @@ class _BrowserWillBuildTreeFilter:
 
 
 browser_will_build_tree = _BrowserWillBuildTreeFilter()
+
+
+class _BrowserWillSearchHook:
+    """Allows you to modify the search text, or perform your own search.
+         
+         You can modify context.search to change the text that is sent to the
+         searching backend.
+         
+         If you set context.card_ids to a list of ids, the regular search will
+         not be performed, and the provided ids will be used instead.
+         
+         Your add-on should check if context.card_ids is not None, and return
+         without making changes if it has been set.
+         """
+
+    _hooks: List[Callable[["aqt.browser.SearchContext"], None]] = []
+
+    def append(self, cb: Callable[["aqt.browser.SearchContext"], None]) -> None:
+        """(context: aqt.browser.SearchContext)"""
+        self._hooks.append(cb)
+
+    def remove(self, cb: Callable[["aqt.browser.SearchContext"], None]) -> None:
+        if cb in self._hooks:
+            self._hooks.remove(cb)
+
+    def __call__(self, context: aqt.browser.SearchContext) -> None:
+        for hook in self._hooks:
+            try:
+                hook(context)
+            except:
+                # if the hook fails, remove it
+                self._hooks.remove(hook)
+                raise
+
+
+browser_will_search = _BrowserWillSearchHook()
 
 
 class _BrowserWillShowHook:
@@ -905,6 +1077,30 @@ class _EditorDidFocusFieldHook:
 editor_did_focus_field = _EditorDidFocusFieldHook()
 
 
+class _EditorDidInitHook:
+    _hooks: List[Callable[["aqt.editor.Editor"], None]] = []
+
+    def append(self, cb: Callable[["aqt.editor.Editor"], None]) -> None:
+        """(editor: aqt.editor.Editor)"""
+        self._hooks.append(cb)
+
+    def remove(self, cb: Callable[["aqt.editor.Editor"], None]) -> None:
+        if cb in self._hooks:
+            self._hooks.remove(cb)
+
+    def __call__(self, editor: aqt.editor.Editor) -> None:
+        for hook in self._hooks:
+            try:
+                hook(editor)
+            except:
+                # if the hook fails, remove it
+                self._hooks.remove(hook)
+                raise
+
+
+editor_did_init = _EditorDidInitHook()
+
+
 class _EditorDidInitButtonsHook:
     _hooks: List[Callable[[List, "aqt.editor.Editor"], None]] = []
 
@@ -1034,6 +1230,64 @@ class _EditorDidUpdateTagsHook:
 
 
 editor_did_update_tags = _EditorDidUpdateTagsHook()
+
+
+class _EditorWebViewDidInitHook:
+    _hooks: List[Callable[["aqt.editor.EditorWebView"], None]] = []
+
+    def append(self, cb: Callable[["aqt.editor.EditorWebView"], None]) -> None:
+        """(editor_web_view: aqt.editor.EditorWebView)"""
+        self._hooks.append(cb)
+
+    def remove(self, cb: Callable[["aqt.editor.EditorWebView"], None]) -> None:
+        if cb in self._hooks:
+            self._hooks.remove(cb)
+
+    def __call__(self, editor_web_view: aqt.editor.EditorWebView) -> None:
+        for hook in self._hooks:
+            try:
+                hook(editor_web_view)
+            except:
+                # if the hook fails, remove it
+                self._hooks.remove(hook)
+                raise
+
+
+editor_web_view_did_init = _EditorWebViewDidInitHook()
+
+
+class _EditorWillLoadNoteFilter:
+    """Allows changing the javascript commands to load note before
+        executing it and do change in the QT editor."""
+
+    _hooks: List[Callable[[str, "anki.notes.Note", "aqt.editor.Editor"], str]] = []
+
+    def append(
+        self, cb: Callable[[str, "anki.notes.Note", "aqt.editor.Editor"], str]
+    ) -> None:
+        """(js: str, note: anki.notes.Note, editor: aqt.editor.Editor)"""
+        self._hooks.append(cb)
+
+    def remove(
+        self, cb: Callable[[str, "anki.notes.Note", "aqt.editor.Editor"], str]
+    ) -> None:
+        if cb in self._hooks:
+            self._hooks.remove(cb)
+
+    def __call__(
+        self, js: str, note: anki.notes.Note, editor: aqt.editor.Editor
+    ) -> str:
+        for filter in self._hooks:
+            try:
+                js = filter(js, note, editor)
+            except:
+                # if the hook fails, remove it
+                self._hooks.remove(filter)
+                raise
+        return js
+
+
+editor_will_load_note = _EditorWillLoadNoteFilter()
 
 
 class _EditorWillShowContextMenuHook:
@@ -1180,6 +1434,30 @@ class _MediaSyncDidStartOrStopHook:
 
 
 media_sync_did_start_or_stop = _MediaSyncDidStartOrStopHook()
+
+
+class _ModelsAdvancedWillShowHook:
+    _hooks: List[Callable[[QDialog], None]] = []
+
+    def append(self, cb: Callable[[QDialog], None]) -> None:
+        """(advanced: QDialog)"""
+        self._hooks.append(cb)
+
+    def remove(self, cb: Callable[[QDialog], None]) -> None:
+        if cb in self._hooks:
+            self._hooks.remove(cb)
+
+    def __call__(self, advanced: QDialog) -> None:
+        for hook in self._hooks:
+            try:
+                hook(advanced)
+            except:
+                # if the hook fails, remove it
+                self._hooks.remove(hook)
+                raise
+
+
+models_advanced_will_show = _ModelsAdvancedWillShowHook()
 
 
 class _OverviewDidRefreshHook:
@@ -1672,6 +1950,30 @@ class _StyleDidInitFilter:
 
 
 style_did_init = _StyleDidInitFilter()
+
+
+class _TagEditorDidProcessKeyHook:
+    _hooks: List[Callable[[TagEdit, QEvent], None]] = []
+
+    def append(self, cb: Callable[[TagEdit, QEvent], None]) -> None:
+        """(tag_edit: TagEdit, evt: QEvent)"""
+        self._hooks.append(cb)
+
+    def remove(self, cb: Callable[[TagEdit, QEvent], None]) -> None:
+        if cb in self._hooks:
+            self._hooks.remove(cb)
+
+    def __call__(self, tag_edit: TagEdit, evt: QEvent) -> None:
+        for hook in self._hooks:
+            try:
+                hook(tag_edit, evt)
+            except:
+                # if the hook fails, remove it
+                self._hooks.remove(hook)
+                raise
+
+
+tag_editor_did_process_key = _TagEditorDidProcessKeyHook()
 
 
 class _TopToolbarDidInitLinksHook:

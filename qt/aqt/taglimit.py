@@ -17,11 +17,11 @@ class TagLimit(QDialog):
         s = QShortcut(
             QKeySequence("ctrl+d"), self.dialog.activeList, context=Qt.WidgetShortcut
         )
-        s.activated.connect(self.dialog.activeList.clearSelection)
+        qconnect(s.activated, self.dialog.activeList.clearSelection)
         s = QShortcut(
             QKeySequence("ctrl+d"), self.dialog.inactiveList, context=Qt.WidgetShortcut
         )
-        s.activated.connect(self.dialog.inactiveList.clearSelection)
+        qconnect(s.activated, self.dialog.inactiveList.clearSelection)
         self.rebuildTagList()
         restoreGeom(self, "tagLimit")
         self.exec_()
@@ -93,12 +93,12 @@ class TagLimit(QDialog):
         if yes:
             arr = []
             for req in yes:
-                arr.append("tag:'%s'" % req)
+                arr.append('tag:"%s"' % req)
             self.tags += "(" + " or ".join(arr) + ")"
         if no:
             arr = []
             for req in no:
-                arr.append("-tag:'%s'" % req)
+                arr.append('-tag:"%s"' % req)
             self.tags += " " + " ".join(arr)
         saveGeom(self, "tagLimit")
         QDialog.accept(self)

@@ -3,13 +3,12 @@
 # License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
 
 import platform
-import sys
 from typing import Dict
 
 from anki.utils import isMac
 from aqt import QApplication, gui_hooks, isWin
 from aqt.colors import colors
-from aqt.qt import QColor, QIcon, QPalette, QPixmap, QStyleFactory, Qt, qtminor
+from aqt.qt import QColor, QIcon, QPalette, QPixmap, QStyleFactory, Qt
 
 
 class ThemeManager:
@@ -19,18 +18,16 @@ class ThemeManager:
     _icon_size = 128
 
     def macos_dark_mode(self) -> bool:
-        if not getattr(sys, "frozen", False):
-            return False
+        "True if the user has night mode on, and has forced native widgets."
         if not isMac:
             return False
-        if qtminor < 13:
-            return False
-        import darkdetect  # pylint: disable=import-error
 
-        return darkdetect.isDark() is True
+        from aqt import mw
+
+        return self._night_mode_preference and mw.pm.dark_mode_widgets()
 
     def get_night_mode(self) -> bool:
-        return self.macos_dark_mode() or self._night_mode_preference
+        return self._night_mode_preference
 
     def set_night_mode(self, val: bool) -> None:
         self._night_mode_preference = val

@@ -34,18 +34,22 @@ class DeckStats(QDialog):
         self.setMinimumWidth(700)
         f = self.form
         if theme_manager.night_mode and not theme_manager.macos_dark_mode():
-            self.setStyleSheet("QGroupBox { padding-top: 0; }")
+            # the grouping box renders incorrectly in the fusion theme. 5.9+
+            # 5.13 behave differently to 5.14, but it looks bad in either case,
+            # and adjusting the top margin makes the 'save PDF' button show in
+            # the wrong place, so for now we just disable the border instead
+            self.setStyleSheet("QGroupBox { border: 0; }")
         f.setupUi(self)
         restoreGeom(self, self.name)
         b = f.buttonBox.addButton(_("Save PDF"), QDialogButtonBox.ActionRole)
-        b.clicked.connect(self.saveImage)
+        qconnect(b.clicked, self.saveImage)
         b.setAutoDefault(False)
-        f.groups.clicked.connect(lambda: self.changeScope("deck"))
+        qconnect(f.groups.clicked, lambda: self.changeScope("deck"))
         f.groups.setShortcut("g")
-        f.all.clicked.connect(lambda: self.changeScope("collection"))
-        f.month.clicked.connect(lambda: self.changePeriod(0))
-        f.year.clicked.connect(lambda: self.changePeriod(1))
-        f.life.clicked.connect(lambda: self.changePeriod(2))
+        qconnect(f.all.clicked, lambda: self.changeScope("collection"))
+        qconnect(f.month.clicked, lambda: self.changePeriod(0))
+        qconnect(f.year.clicked, lambda: self.changePeriod(1))
+        qconnect(f.life.clicked, lambda: self.changePeriod(2))
         maybeHideClose(self.form.buttonBox)
         addCloseShortcut(self)
         self.show()
